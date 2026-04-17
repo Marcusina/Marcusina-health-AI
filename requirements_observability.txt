@@ -1,0 +1,10 @@
+# Logging & monitoring
+loguru==0.7.2
+prometheus-fastapi-instrumentator==7.0.0
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+
+# Testing
+pytest==8.1.1
+pytest-asyncio==0.23.6
+pytest-mock==3.14.0

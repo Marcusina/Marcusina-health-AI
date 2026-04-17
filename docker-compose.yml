@@ -1,0 +1,200 @@
+version: "3.9"
+
+# =============================================================================
+# Health AI — Full Production Stack
+# Linux server deployment (Ubuntu 22.04 recommended)
+# =============================================================================
+# Services:
+#   ai_api           → FastAPI (Gunicorn + uvicorn workers) — handles HTTP
+#   worker_emergency → Celery worker — emergency triage only (highest priority)
+#   worker_realtime  → Celery worker — audio transcription
+#   worker_normal    → Celery workers — SOAP notes, moderation
+#   worker_batch     → Celery worker — recommendations, analytics
+#   rabbitmq         → Message broker (task queue)
+#   redis            → Cache + Celery result backend
+#   flower           → Celery monitoring UI
+#   nginx            → Reverse proxy + rate limiting
+# =============================================================================
+
+x-worker-base: &worker-base
+  build: .
+  environment:
+    - ENVIRONMENT=production
+    - API_SECRET_KEY=${API_SECRET_KEY}
+    - REDIS_URL=redis://redis:6379/0
+    - REDIS_RESULT_URL=redis://redis:6379/1
+    - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672//
+    - FASTIFY_CALLBACK_URL=${FASTIFY_CALLBACK_URL}
+    - FASTIFY_CALLBACK_SECRET=${FASTIFY_CALLBACK_SECRET}
+    - MODELS_DIR=/app/models
+    - ONNX_MODELS_DIR=/app/models/onnx
+    - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base}
+    - WHISPER_COMPUTE_TYPE=int8
+    - WHISPER_DEVICE=cpu
+  volumes:
+    - ai_models:/app/models
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  networks:
+    - health_network
+
+services:
+  # ── FastAPI HTTP Server ──────────────────────────────────────────────────
+  ai_api:
+    <<: *worker-base
+    container_name: health_ai_api
+    command: >
+      gunicorn app.main:app
+        --worker-class uvicorn.workers.UvicornWorker
+        --workers ${API_WORKERS:-4}
+        --bind 0.0.0.0:8001
+        --timeout 30
+        --keep-alive 5
+        --log-level info
+        --access-logfile -
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ── Celery Workers (one per queue for isolation & priority) ──────────────
+  worker_emergency:
+    <<: *worker-base
+    container_name: health_worker_emergency
+    command: >
+      celery -A app.core.celery_app worker
+        --queues emergency
+        --concurrency 4
+        --hostname emergency@%h
+        --loglevel info
+        --without-heartbeat
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  worker_realtime:
+    <<: *worker-base
+    container_name: health_worker_realtime
+    command: >
+      celery -A app.core.celery_app worker
+        --queues realtime
+        --concurrency 2
+        --hostname realtime@%h
+        --loglevel info
+    deploy:
+      resources:
+        limits:
+          memory: 6G    # Whisper model is large
+
+  worker_normal:
+    <<: *worker-base
+    container_name: health_worker_normal
+    command: >
+      celery -A app.core.celery_app worker
+        --queues normal
+        --concurrency ${NORMAL_WORKERS:-8}
+        --hostname normal@%h
+        --loglevel info
+    deploy:
+      replicas: 2       # Run 2 instances for normal queue throughput
+
+  worker_batch:
+    <<: *worker-base
+    container_name: health_worker_batch
+    command: >
+      celery -A app.core.celery_app worker
+        --queues batch
+        --concurrency 4
+        --hostname batch@%h
+        --loglevel info
+
+  # ── Celery Beat (periodic task scheduler) ────────────────────────────────
+  celery_beat:
+    <<: *worker-base
+    container_name: health_celery_beat
+    command: celery -A app.core.celery_app beat --loglevel info
+
+  # ── RabbitMQ (message broker) ─────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: health_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - health_network
+
+  # ── Redis Cluster (cache + result backend) ───────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: health_redis
+    command: >
+      redis-server
+        --maxmemory 4gb
+        --maxmemory-policy allkeys-lru
+        --save 900 1
+        --save 300 10
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - health_network
+
+  # ── Celery Flower (monitoring UI) ────────────────────────────────────────
+  flower:
+    <<: *worker-base
+    container_name: health_flower
+    command: >
+      celery -A app.core.celery_app flower
+        --port=5555
+        --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASS:-admin}
+    ports:
+      - "5555:5555"
+
+  # ── Nginx (rate limiting + TLS termination) ──────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: health_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - ai_api
+    networks:
+      - health_network
+
+volumes:
+  ai_models:
+  rabbitmq_data:
+  redis_data:
+
+networks:
+  health_network:
+    driver: bridge
