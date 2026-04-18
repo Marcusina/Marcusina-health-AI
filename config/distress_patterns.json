@@ -1,0 +1,16 @@
+{
+  "_comment": "Regex patterns for mental health distress detection.",
+  "patterns": [
+    "want to (die|end it|kill myself|end my life)",
+    "no reason to live",
+    "don'?t see any reason to (continue|go on|live)",
+    "can'?t go on",
+    "suicidal",
+    "self[- ]?harm",
+    "overdose on purpose",
+    "nothing to live for",
+    "better off dead",
+    "don'?t want to (wake up|be here|exist)",
+    "struggling (so much|too much).{0,40}(reason|purpose|point)"
+  ]
+}

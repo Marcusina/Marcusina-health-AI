@@ -1,9 +1,4 @@
-"""
-Redis Cache Utility
-====================
-Provides both async (FastAPI routes) and sync (Celery tasks) interfaces.
-Uses hiredis C extension for 10× faster parsing.
-"""
+
 
 from __future__ import annotations
 import json

@@ -1,7 +1,3 @@
-"""
-Audit Logger — NDPR/HIPAA-compliant structured logging.
-Every AI decision that touches patient data is logged to audit.log (NDJSON).
-"""
 
 import json
 import uuid

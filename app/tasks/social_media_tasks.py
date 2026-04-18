@@ -18,32 +18,17 @@ from app.core.config import get_settings
 from app.core.model_registry import get_model_registry, run_onnx_classifier
 from app.utils.cache import make_cache_key, sync_get_cached, sync_cache_result
 from app.utils.audit import log_moderation
+from app.utils.config_loader import (
+    get_health_claim_pattern,
+    get_distress_pattern,
+    get_toxic_keywords,
+)
 
 settings = get_settings()
+_presidio_analyzer = None
+_presidio_anonymizer = None
 
-# ── Compile patterns once at import time ─────────────────────────────────────
-HEALTH_CLAIM_RE = re.compile(
-    r"cures? (cancer|diabetes|hiv|aids|malaria)"
-    r"|100% effective"
-    r"|doctors? (don'?t|do not) want you to know"
-    r"|miracle (cure|treatment|drug)"
-    r"|guaranteed (cure|treatment)"
-    r"|no side effects guaranteed"
-    r"|big pharma (hiding|suppressing)",
-    re.IGNORECASE,
-)
-DISTRESS_RE = re.compile(
-    r"want to (die|end it|kill myself)"
-    r"|no reason to live"
-    r"|suicidal"
-    r"|self.harm"
-    r"|overdose on purpose",
-    re.IGNORECASE,
-)
-TOXIC_KEYWORDS = frozenset([
-    "quack", "fake doctor", "kill yourself", "you deserve to suffer",
-    "idiot patient", "medical fraud",
-])
+
 
 
 class ModelTask(Task):
@@ -92,20 +77,20 @@ def task_moderate(
         session, tokenizer = self.registry.misinfo
         misinfo_score = 0.0
         if session is not None:
-            scores = run_onnx_classifier(session, tokenizer, text)
-            misinfo_score = next(
-                (s["score"] for s in scores if "FAKE" in s["label"].upper()), 0.0
-            )
+        
+            id2label = self.registry.get_id2label("misinfo")
+            scores = run_onnx_classifier(session, tokenizer, text, id2label=id2label)
+            misinfo_score = next((s["score"] for s in scores if s["label"] == "FAKE"), 0.0)
         if misinfo_score >= settings.MISINFO_THRESHOLD:
             flagged_reasons.append(f"Health misinformation detected (score: {misinfo_score:.2f})")
 
         # ── Layer 2: Health claim patterns ────────────────────────────────
-        health_claim = bool(HEALTH_CLAIM_RE.search(text))
+        health_claim = bool(get_health_claim_pattern().search(text))
         if health_claim:
             flagged_reasons.append("Unverified health claim")
 
         # ── Layer 3: Toxicity (keyword + classifier) ──────────────────────
-        toxic_hits = [kw for kw in TOXIC_KEYWORDS if kw in text_lower]
+        toxic_hits = [kw for kw in get_toxic_keywords() if kw in text_lower]
         toxicity_score = min(len(toxic_hits) / 3.0, 1.0)
         if toxic_hits:
             flagged_reasons.append(f"Toxic language: {', '.join(toxic_hits[:2])}")
@@ -145,14 +130,28 @@ def task_moderate(
         logger.error(f"Moderation task {task_id} failed: {exc}")
         raise self.retry(exc=exc, countdown=2)
 
-
-def _detect_pii(text: str) -> tuple[bool, str | None]:
-    """PII detection via presidio. Returns (detected, redacted_text)."""
-    try:
+def _get_presidio_engines():
+    """Initialize Presidio once per worker process and cache it."""
+    global _presidio_analyzer, _presidio_anonymizer
+    if _presidio_analyzer is None:
         from presidio_analyzer import AnalyzerEngine
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
         from presidio_anonymizer import AnonymizerEngine
-        analyzer = AnalyzerEngine()
-        anonymizer = AnonymizerEngine()
+
+        # Use en_core_web_sm (already installed, 12MB) not en_core_web_lg (587MB)
+        provider = NlpEngineProvider(nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+        })
+        nlp_engine = provider.create_engine()
+        _presidio_analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+        _presidio_anonymizer = AnonymizerEngine()
+        logger.info("Presidio PII engine initialized (en_core_web_sm).")
+    return _presidio_analyzer, _presidio_anonymizer
+def _detect_pii(text: str) -> tuple[bool, str | None]:
+    """PII detection via presidio. Engines cached — initialized once per worker."""
+    try:
+        analyzer, anonymizer = _get_presidio_engines()
         results = analyzer.analyze(text=text, language="en")
         if results:
             return True, anonymizer.anonymize(text=text, analyzer_results=results).text
@@ -160,7 +159,6 @@ def _detect_pii(text: str) -> tuple[bool, str | None]:
     except Exception as e:
         logger.warning(f"PII detection failed: {e}")
         return False, None
-
 
 # ================================================================ #
 # Recommendations                                                    #
@@ -279,7 +277,8 @@ def task_sentiment(
         scores = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
 
         if session is not None:
-            raw_scores = run_onnx_classifier(session, tokenizer, text)
+            id2label = self.registry.get_id2label("sentiment")
+            raw_scores = run_onnx_classifier(session, tokenizer, text, id2label=id2label)
             scores = {}
             for item in raw_scores:
                 label = item["label"].lower()
@@ -295,7 +294,7 @@ def task_sentiment(
             elif scores.get("negative", 0) > 0.6:
                 sentiment = "negative"
 
-        mental_health_concern = bool(DISTRESS_RE.search(text))
+        mental_health_concern = bool(get_distress_pattern().search(text))
 
         result = {
             "success": True,

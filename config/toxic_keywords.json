@@ -1,0 +1,15 @@
+{
+  "_comment": "Exact phrase toxicity keywords. Add more without touching code.",
+  "keywords": [
+    "quack",
+    "fake doctor",
+    "kill yourself",
+    "you deserve to suffer",
+    "idiot patient",
+    "medical fraud",
+    "witch doctor",
+    "you deserve to die",
+    "go kill yourself",
+    "end your life"
+  ]
+}

@@ -1,19 +1,4 @@
-"""
-Model Registry (ONNX Runtime)
-==============================
-All models run through ONNX Runtime — no PyTorch at inference time.
-- 4-8× faster inference than PyTorch
-- Much smaller memory footprint
-- No CUDA dependency (CPU inference is production-grade)
-- Models are loaded once per worker process and kept in memory
 
-faster-whisper uses CTranslate2 backend (INT8 quantized):
-- No pkg_resources issues
-- No system ffmpeg dependency (uses libav via PyAV)
-- 4× faster than openai-whisper on CPU
-
-ONNX models are exported once via: python scripts/export_onnx.py
-"""
 
 from __future__ import annotations
 import os
@@ -35,7 +20,7 @@ from app.core.config import get_settings
 settings = get_settings()
 
 
-def _make_ort_session(model_path: str) -> ort.InferenceSession:
+def _make_ort_session(model_path: str) -> "ort.InferenceSession":
     """Create an ONNX Runtime session with optimised thread settings."""
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = settings.ONNX_INTRA_THREADS
@@ -43,9 +28,12 @@ def _make_ort_session(model_path: str) -> ort.InferenceSession:
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
-    providers = ["CPUExecutionProvider"]  # Add CUDAExecutionProvider first if GPU available
-    return ort.InferenceSession(model_path, sess_options=opts, providers=providers)
+    providers = ["CPUExecutionProvider"]
+    session = ort.InferenceSession(model_path, sess_options=opts, providers=providers)
 
+    # Store path on session so run_onnx_classifier can find config.json
+    session._model_path = model_path
+    return session
 
 class ModelRegistry:
     """
@@ -100,6 +88,7 @@ class ModelRegistry:
     # ── ONNX NLP models ──────────────────────────────────────────────────────
 
     def _load_onnx_models(self):
+        import json
         onnx_dir = Path(settings.ONNX_MODELS_DIR)
 
         models = [
@@ -109,24 +98,40 @@ class ModelRegistry:
             ("sentiment", settings.HF_SENTIMENT_MODEL,  "_sentiment_session", "_sentiment_tokenizer"),
         ]
 
+        # Store id2label maps separately — keyed by model name
+        self._id2label: dict[str, dict] = {}
+
         for name, hf_model_id, session_attr, tokenizer_attr in models:
             onnx_path = onnx_dir / name / "model.onnx"
+            config_path = onnx_dir / name / "config.json"
+
+            # Load id2label from the saved config.json
+            if config_path.exists():
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                raw = cfg.get("id2label", {})
+                # Keys from JSON are always strings — convert to int keys
+                self._id2label[name] = {int(k): v for k, v in raw.items()} if raw else {}
+                if self._id2label[name]:
+                    logger.info(f"[{name}] Labels: {self._id2label[name]}")
+                else:
+                    logger.warning(f"[{name}] id2label is empty in config.json — check verify_labels.py")
+            else:
+                self._id2label[name] = {}
+                logger.warning(f"[{name}] No config.json found at {config_path}")
+
             if not onnx_path.exists():
-                logger.warning(
-                    f"ONNX model not found at {onnx_path}. "
-                    f"Run: python scripts/export_onnx.py --model {name}\n"
-                    f"Falling back to tokenizer-only mode (limited functionality)."
-                )
+                logger.warning(f"ONNX model not found: {onnx_path}. Run: python scripts/export_onnx.py --model {name}")
                 setattr(self, session_attr, None)
             else:
-                logger.info(f"Loading ONNX [{name}] from {onnx_path}")
+                logger.info(f"Loading ONNX [{name}]...")
                 setattr(self, session_attr, _make_ort_session(str(onnx_path)))
 
-            # Tokenizer is always loaded from HuggingFace cache (fast, ~10MB)
-            logger.info(f"Loading tokenizer for [{name}]...")
-            setattr(self, tokenizer_attr,
-                    AutoTokenizer.from_pretrained(hf_model_id))
+            logger.info(f"Loading tokenizer [{name}] from {hf_model_id}...")
+            setattr(self, tokenizer_attr, AutoTokenizer.from_pretrained(hf_model_id))
 
+    def get_id2label(self, name: str) -> dict:
+        return self._id2label.get(name, {})
     # ── Sentence embedder ─────────────────────────────────────────────────────
 
     def _load_embedder(self):
@@ -211,17 +216,19 @@ def get_model_registry() -> ModelRegistry:
     return _registry
 
 
-# ── ONNX inference helpers ────────────────────────────────────────────────────
-
 def run_onnx_classifier(
-    session: ort.InferenceSession,
+    session: "ort.InferenceSession",
     tokenizer,
     text: str,
     max_length: int = 512,
+    id2label: dict = None,
 ) -> list[dict]:
     """
     Run a HuggingFace sequence-classification ONNX model.
-    Returns list of {label, score} dicts, sorted by score descending.
+    Returns list of {label, score} sorted by score descending.
+
+    id2label must be passed in explicitly from the registry loader —
+    do not rely on session._model_path which is not guaranteed to be set.
     """
     import numpy as np
     from scipy.special import softmax
@@ -233,14 +240,23 @@ def run_onnx_classifier(
         truncation=True,
         padding=True,
     )
-    # ONNX Runtime expects numpy arrays
-    ort_inputs = {k: v for k, v in inputs.items() if k in [i.name for i in session.get_inputs()]}
+
+    valid_names = {i.name for i in session.get_inputs()}
+    ort_inputs = {
+    k: v.astype("int64") if v.dtype.kind == "i" else v
+    for k, v in inputs.items()
+    if k in valid_names
+}
+
     logits = session.run(None, ort_inputs)[0][0]
     scores = softmax(logits).tolist()
 
-    id2label = tokenizer.config.id2label if hasattr(tokenizer, "config") else {i: str(i) for i in range(len(scores))}
+    if not id2label:
+        id2label = {i: str(i) for i in range(len(scores))}
+
     return sorted(
-        [{"label": id2label.get(i, str(i)), "score": float(s)} for i, s in enumerate(scores)],
+        [{"label": id2label.get(i, str(i)), "score": float(s)}
+         for i, s in enumerate(scores)],
         key=lambda x: x["score"],
         reverse=True,
     )

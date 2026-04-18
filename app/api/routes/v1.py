@@ -1,17 +1,3 @@
-"""
-API Routes — FastAPI (async, non-blocking)
-==========================================
-Every endpoint:
-1. Validates the request (Pydantic, <1ms)
-2. Checks Redis cache — returns instantly on hit
-3. Enqueues Celery task — returns task_id in <5ms
-4. Celery worker processes async, sends result via webhook OR
-   Fastify polls GET /task/{task_id} for the result
-
-This means FastAPI NEVER blocks on AI inference.
-At 50k req/sec, Fastify + FastAPI handle queueing; workers scale horizontally.
-"""
-
 from __future__ import annotations
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status

@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.core.model_registry import get_model_registry, run_onnx_classifier
 from app.utils.cache import make_cache_key, sync_get_cached, sync_cache_result
 from app.utils.audit import log_triage, log_soap_generated, log_transcription
+from app.utils.config_loader import get_red_flags, get_icd_map, get_specialty_map
 
 settings = get_settings()
 
@@ -39,12 +40,6 @@ class ModelTask(Task):
 
 
 # ── Red flag keywords for emergency detection ─────────────────────────────────
-RED_FLAGS = [
-    "chest pain", "chest tightness", "can't breathe", "difficulty breathing",
-    "stroke", "paralysis", "unconscious", "seizure", "severe bleeding",
-    "suicidal", "overdose", "allergic reaction", "anaphylaxis",
-    "heart attack", "not breathing",
-]
 
 
 # ================================================================ #
@@ -158,7 +153,7 @@ def _run_triage(self_task, task_id: str, patient_id: str, symptoms: str,
     symptoms_lower = symptoms.lower()
 
     # ── Red flag check (always overrides ML score) ────────────────────────
-    red_flags = [kw for kw in RED_FLAGS if kw in symptoms_lower]
+    red_flags = [kw for kw in get_red_flags() if kw in symptoms_lower]
 
     # ── ML urgency scoring via ONNX ───────────────────────────────────────
     session, tokenizer = self_task.registry.triage
@@ -170,8 +165,11 @@ def _run_triage(self_task, task_id: str, patient_id: str, symptoms: str,
 
     urgency_score = 0.5  # default
     if session is not None:
-        scores = run_onnx_classifier(session, tokenizer, input_text)
-        urgency_score = scores[0]["score"]  # Highest-scored label's confidence
+        id2label = self_task.registry.get_id2label("triage")
+        scores = run_onnx_classifier(session, tokenizer, input_text, id2label=id2label)
+        # Find the score for the "urgent" label specifically
+        urgent_score = next((s["score"] for s in scores if s["label"] == "urgent"), scores[0]["score"])
+        urgency_score = urgent_score
 
     # ── Determine urgency level ───────────────────────────────────────────
     if red_flags:
@@ -187,14 +185,9 @@ def _run_triage(self_task, task_id: str, patient_id: str, symptoms: str,
         urgency_level = "self_care"
 
     # ── Specialty routing ─────────────────────────────────────────────────
-    SPECIALTY_MAP = {
-        "chest": "Pulmonologist", "cardiac": "Cardiologist",
-        "mental": "Psychiatrist", "skin": "Dermatologist",
-        "stomach": "Gastroenterologist", "eye": "Ophthalmologist",
-        "bone": "Orthopedist", "joint": "Rheumatologist",
-    }
+  
     specialty = "General Practitioner"
-    for kw, spec in SPECIALTY_MAP.items():
+    for kw, spec in get_specialty_map().items():
         if kw in symptoms_lower:
             specialty = spec
             break
@@ -307,17 +300,14 @@ def _extract_entities_onnx(session, tokenizer, text: str) -> dict:
     return {k: list(set(v)) for k, v in entities.items()}
 
 
+
 def _suggest_icd(entities: dict) -> list[str]:
-    ICD_MAP = {
-        "hypertension": "I10", "diabetes": "E11", "asthma": "J45",
-        "malaria": "B54", "typhoid": "A01.0", "pneumonia": "J18",
-        "fever": "R50.9", "headache": "R51", "cough": "R05",
-    }
+    icd_map = get_icd_map()
     codes = []
-    terms = entities.get("diagnoses", []) + entities.get("symptoms", [])
-    for term in terms:
-        for kw, code in ICD_MAP.items():
-            if kw in term.lower() and code not in codes:
+    all_terms = entities.get("diagnoses", []) + entities.get("symptoms", [])
+    for term in all_terms:
+        for keyword, code in icd_map.items():
+            if keyword in term.lower() and code not in codes:
                 codes.append(code)
     return codes[:5]
 

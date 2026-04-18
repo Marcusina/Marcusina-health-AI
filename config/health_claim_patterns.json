@@ -1,0 +1,15 @@
+{
+  "_comment": "Python regex patterns for unverified health claims. Edit without touching code.",
+  "patterns": [
+    "cures? (cancer|diabetes|hiv|aids|malaria|hypertension)",
+    "100% effective",
+    "doctors? (don'?t|do not) want you to know",
+    "miracle (cure|treatment|drug|remedy)",
+    "guaranteed (cure|treatment|recovery)",
+    "no side effects guaranteed",
+    "big pharma (hiding|suppressing|covering up)",
+    "government (hiding|suppressing) (cure|treatment)",
+    "secret (cure|remedy|treatment)",
+    "they don'?t want you to know"
+  ]
+}

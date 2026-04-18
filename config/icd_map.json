@@ -1,0 +1,29 @@
+{
+  "_comment": "Symptom/diagnosis keyword to ICD-10 code. Extend without code changes.",
+  "mappings": {
+    "hypertension": "I10",
+    "high blood pressure": "I10",
+    "diabetes": "E11",
+    "type 2 diabetes": "E11",
+    "asthma": "J45",
+    "malaria": "B54",
+    "typhoid": "A01.0",
+    "pneumonia": "J18",
+    "anaemia": "D64.9",
+    "anemia": "D64.9",
+    "fever": "R50.9",
+    "headache": "R51",
+    "cough": "R05",
+    "chest pain": "R07.9",
+    "diarrhea": "A09",
+    "diarrhoea": "A09",
+    "sickle cell": "D57",
+    "hiv": "B20",
+    "tuberculosis": "A15",
+    "stroke": "I64",
+    "heart failure": "I50",
+    "kidney disease": "N18",
+    "anxiety": "F41",
+    "depression": "F32"
+  }
+}

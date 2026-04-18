@@ -73,12 +73,13 @@ class Settings(BaseSettings):
     # ── ONNX NLP Models ───────────────────────────────────────────────────────
     # HuggingFace model IDs — converted to ONNX at setup time via scripts/export_onnx.py
     # After export, inference uses ONNX Runtime (no PyTorch at runtime).
-    HF_NER_MODEL: str = "samrawal/bert-base-uncased_clinical-ner"
+    HF_NER_MODEL: str = "d4data/biomedical-ner-all"
     HF_SUMMARIZER_MODEL: str = "facebook/bart-large-cnn"
-    HF_TRIAGE_MODEL: str = "distilbert-base-uncased"
-    HF_MISINFO_MODEL: str = "hamzab/roberta-fake-news-classification"
+    HF_TRIAGE_MODEL: str = "Yuvrajxms09/biobert-triage-classifier"
+    HF_MISINFO_MODEL: str = "jy46604790/Fake-News-Bert-Detect"
     HF_SENTIMENT_MODEL: str = "cardiffnlp/twitter-roberta-base-sentiment-latest"
     HF_EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+
 
     # ── ONNX Runtime settings ─────────────────────────────────────────────────
     # Number of threads for ONNX intra-op parallelism per worker process

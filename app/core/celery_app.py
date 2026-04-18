@@ -1,19 +1,4 @@
-"""
-Celery Task Queue
-==================
-Handles async AI tasks so Fastify never waits for long inference.
 
-Flow:
-  Fastify POST → FastAPI enqueues task → returns task_id immediately
-  Celery worker picks up task → runs inference → stores result in Redis
-  Fastify polls GET /task/{task_id} OR receives webhook callback
-
-Priority queues (highest → lowest):
-  emergency  → Triage with red-flag symptoms
-  realtime   → Consultation transcription (patient is waiting)
-  normal     → SOAP notes, content moderation
-  batch      → Recommendations, analytics, bulk operations
-"""
 
 from celery import Celery
 from celery.schedules import crontab

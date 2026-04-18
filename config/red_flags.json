@@ -1,0 +1,30 @@
+{
+  "_comment": "Emergency symptom keywords. Case-insensitive substring match. Edit here, no code changes needed.",
+  "keywords": [
+    "chest pain",
+    "chest tightness",
+    "can't breathe",
+    "cannot breathe",
+    "difficulty breathing",
+    "shortness of breath",
+    "stroke",
+    "facial drooping",
+    "arm weakness",
+    "paralysis",
+    "unconscious",
+    "unresponsive",
+    "seizure",
+    "severe bleeding",
+    "heavy bleeding",
+    "suicidal",
+    "want to die",
+    "kill myself",
+    "overdose",
+    "allergic reaction",
+    "anaphylaxis",
+    "heart attack",
+    "not breathing",
+    "choking",
+    "loss of consciousness"
+  ]
+}

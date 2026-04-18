@@ -1,36 +1,25 @@
-# Health AI Service v2
+# Health AI Service 
 
 High-throughput AI microservice bridging your **Fastify JS backend** with AI inference.
 Built for **50,000+ req/sec**, **5M+ users**, **24/7 uptime**.
 
-## What changed from v1
 
-| Area | v1 (wrong) | v2 (correct) |
-|---|---|---|
-| Speech | `openai-whisper` (build issues, pkg_resources, Windows ffmpeg) | `faster-whisper` (pre-built wheels, CTranslate2 INT8, no ffmpeg dep) |
-| NLP inference | PyTorch at runtime (2GB+, slow) | ONNX Runtime (4-8× faster, CPU-optimised, ~200MB) |
-| Architecture | Blocking — FastAPI waits for inference | Async — Celery queue, FastAPI returns `task_id` in <5ms |
-| Scale | Single process, ~100 req/sec | Gunicorn + Celery workers, scales to 50k+ req/sec |
-| Deployment | Dev-only uvicorn | Gunicorn + uvicorn workers + Nginx + Docker |
-| Priority | All requests equal | 4 queues: emergency / realtime / normal / batch |
-
----
 
 ## Architecture
 
 ```
 Client
-  └─▶ Fastify (JS backend)
-        └─▶ POST /api/v1/* + X-AI-Secret   (returns task_id in <5ms)
-              └─▶ FastAPI (Gunicorn + uvicorn workers)
+  └─ Fastify (JS backend)
+        └─ POST /api/v1/* + X-AI-Secret   (returns task_id in <5ms)
+              └─ FastAPI (Gunicorn + uvicorn workers)
                     ├─ Cache hit → return result immediately
                     └─ Cache miss → enqueue Celery task
-                          ├─▶ RabbitMQ queue (emergency / realtime / normal / batch)
-                          │     └─▶ Celery worker (loads models once, processes tasks)
+                          ├─ RabbitMQ queue (emergency / realtime / normal / batch)
+                          │     └─ Celery worker (loads models once, processes tasks)
                           │           ├─ ONNX Runtime (NLP inference)
                           │           ├─ faster-whisper (speech)
                           │           └─ FAISS (recommendations)
-                          └─▶ Result → Redis → webhook to Fastify
+                          └─ Result → Redis → webhook to Fastify
 ```
 
 ---
@@ -136,28 +125,7 @@ Returns:
 - **Flower** (Celery tasks): http://localhost:5555
 - **RabbitMQ**: http://localhost:15672
 - **Prometheus metrics**: http://localhost:8001/metrics
-- **Audit logs**: `logs/audit.log` (NDJSON, 365-day retention)
+- **Audit logs**: `logs/audit.log` 
 
 ---
 
-## Key design decisions
-
-**faster-whisper over openai-whisper**
-Uses CTranslate2 backend — INT8 quantized, 4× faster, pre-built Linux/Windows wheels,
-no system ffmpeg dependency, no pkg_resources/setuptools issues.
-
-**ONNX Runtime over PyTorch**
-PyTorch is for training, not production inference. ONNX Runtime gives 4-8× speedup,
-graph-level optimizations, and drops the 2GB PyTorch runtime from the Docker image.
-
-**Celery + RabbitMQ over sync FastAPI**
-At 50k req/sec you cannot run inference inline. Celery decouples HTTP handling from
-compute. RabbitMQ persists tasks across restarts (zero message loss).
-
-**4 priority queues**
-Emergency triage cannot wait behind a batch recommendation job. Separate queues +
-dedicated workers mean an emergency always gets CPU within milliseconds.
-
-**Redis cache-first**
-Triage for the same symptom set, moderation of identical text, recommendations for
-the same user profile — all returned from cache in <1ms, zero inference cost.

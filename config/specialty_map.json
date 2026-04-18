@@ -1,0 +1,27 @@
+{
+  "_comment": "Symptom keyword to medical specialty for triage routing.",
+  "mappings": {
+    "chest": "Pulmonologist",
+    "cardiac": "Cardiologist",
+    "heart": "Cardiologist",
+    "mental": "Psychiatrist",
+    "anxiety": "Psychiatrist",
+    "depression": "Psychiatrist",
+    "suicidal": "Psychiatrist",
+    "skin": "Dermatologist",
+    "rash": "Dermatologist",
+    "stomach": "Gastroenterologist",
+    "abdomen": "Gastroenterologist",
+    "eye": "Ophthalmologist",
+    "vision": "Ophthalmologist",
+    "bone": "Orthopedist",
+    "joint": "Rheumatologist",
+    "kidney": "Nephrologist",
+    "urine": "Urologist",
+    "pregnancy": "Obstetrician",
+    "child": "Paediatrician",
+    "ear": "ENT Specialist",
+    "throat": "ENT Specialist",
+    "nose": "ENT Specialist"
+  }
+}
