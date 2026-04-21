@@ -15,10 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY requirements.txt .
+COPY requirements_core.txt requirements_ml.txt requirements_nlp.txt requirements_observability.txt ./
 
-# Install to a local dir so we can copy cleanly to runtime stage
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Install all groups in one pip call so the resolver sees every package at once
+RUN pip install --no-cache-dir --prefix=/install \
+    -r requirements_core.txt \
+    -r requirements_ml.txt \
+    -r requirements_nlp.txt \
+    -r requirements_observability.txt
 
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────

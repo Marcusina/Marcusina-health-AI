@@ -11,6 +11,7 @@ import base64
 import io
 import tempfile
 import os
+import time
 import httpx
 from loguru import logger
 from celery import Task
@@ -21,8 +22,14 @@ from app.core.model_registry import get_model_registry, run_onnx_classifier
 from app.utils.cache import make_cache_key, sync_get_cached, sync_cache_result
 from app.utils.audit import log_triage, log_soap_generated, log_transcription
 from app.utils.config_loader import get_red_flags, get_icd_map, get_specialty_map
+from app.db.repositories import persist_task_result, persist_inference_metric
 
 settings = get_settings()
+
+_callback_client = httpx.Client(
+    timeout=5.0,
+    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+)
 
 
 class ModelTask(Task):
@@ -73,26 +80,27 @@ def task_transcribe(
         _send_callback(callback_url, task_id, cached)
         return cached
 
+    t_start = time.perf_counter()
     try:
         audio_bytes = base64.b64decode(audio_base64)
 
-        # Write to temp file — faster-whisper accepts file path or numpy array
         suffix = f".{audio_format}"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
 
         try:
-            # faster-whisper returns a generator of segments
+            t_whisper = time.perf_counter()
             segments_gen, info = self.registry.whisper.transcribe(
                 tmp_path,
                 language=language,
                 beam_size=settings.WHISPER_BEAM_SIZE,
-                vad_filter=True,              # Skip silent segments (faster)
+                vad_filter=True,
                 vad_parameters={"min_silence_duration_ms": 500},
                 word_timestamps=False,
             )
-            segments = list(segments_gen)     # Materialise generator
+            segments = list(segments_gen)
+            whisper_ms = (time.perf_counter() - t_whisper) * 1000
         finally:
             os.unlink(tmp_path)
 
@@ -114,9 +122,24 @@ def task_transcribe(
         sync_cache_result(cache_key, result, ttl=settings.CACHE_TTL_SECONDS)
         log_transcription(session_id, duration, info.language, request_id=task_id)
         _send_callback(callback_url, task_id, result)
+
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        persist_inference_metric(task_id, "whisper", whisper_ms, info.language, round(confidence, 3))
+        persist_task_result(
+            task_id=task_id, task_type="transcribe",
+            entity_id=session_id, entity_type="session",
+            duration_ms=total_ms,
+            result_summary={"language": info.language, "duration_seconds": round(duration, 2), "confidence": round(confidence, 3)},
+        )
         return result
 
     except Exception as exc:
+        persist_task_result(
+            task_id=task_id, task_type="transcribe",
+            entity_id=session_id, entity_type="session",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary=None, error=str(exc),
+        )
         logger.error(f"Transcription task {task_id} failed: {exc}")
         raise self.retry(exc=exc, countdown=2)
 
@@ -150,6 +173,7 @@ def task_triage_normal(self, task_id: str, **kwargs):
 def _run_triage(self_task, task_id: str, patient_id: str, symptoms: str,
                 age: int | None, vital_signs: dict | None, medical_history: list,
                 callback_url: str | None = None) -> dict:
+    t_start = time.perf_counter()
     symptoms_lower = symptoms.lower()
 
     # ── Red flag check (always overrides ML score) ────────────────────────
@@ -163,13 +187,16 @@ def _run_triage(self_task, task_id: str, patient_id: str, symptoms: str,
     if medical_history:
         input_text += f" History: {', '.join(medical_history)}."
 
-    urgency_score = 0.5  # default
+    urgency_score = 0.5
+    scores = []
     if session is not None:
         id2label = self_task.registry.get_id2label("triage")
+        t_onnx = time.perf_counter()
         scores = run_onnx_classifier(session, tokenizer, input_text, id2label=id2label)
-        # Find the score for the "urgent" label specifically
+        onnx_ms = (time.perf_counter() - t_onnx) * 1000
         urgent_score = next((s["score"] for s in scores if s["label"] == "urgent"), scores[0]["score"])
         urgency_score = urgent_score
+        persist_inference_metric(task_id, "triage", onnx_ms, scores[0]["label"], scores[0]["score"])
 
     # ── Determine urgency level ───────────────────────────────────────────
     if red_flags:
@@ -185,7 +212,6 @@ def _run_triage(self_task, task_id: str, patient_id: str, symptoms: str,
         urgency_level = "self_care"
 
     # ── Specialty routing ─────────────────────────────────────────────────
-  
     specialty = "General Practitioner"
     for kw, spec in get_specialty_map().items():
         if kw in symptoms_lower:
@@ -212,6 +238,14 @@ def _run_triage(self_task, task_id: str, patient_id: str, symptoms: str,
 
     log_triage(patient_id, urgency_level, red_flags, request_id=task_id)
     _send_callback(self_task.request.kwargs.get("callback_url"), task_id, result)
+
+    persist_task_result(
+        task_id=task_id, task_type="triage",
+        entity_id=patient_id, entity_type="patient",
+        duration_ms=int((time.perf_counter() - t_start) * 1000),
+        result_summary={"urgency_score": round(urgency_score, 3), "specialty": specialty},
+        urgency_level=urgency_level,
+    )
     return result
 
 
@@ -235,16 +269,19 @@ def task_soap_note(self, task_id: str, session_id: str, transcript: str,
         _send_callback(callback_url, task_id, cached)
         return cached
 
+    t_start = time.perf_counter()
     try:
         # ── NER extraction ────────────────────────────────────────────────
         ner_session, ner_tokenizer = self.registry.ner
+        t_ner = time.perf_counter()
         entities = _extract_entities_onnx(ner_session, ner_tokenizer, transcript)
+        ner_ms = (time.perf_counter() - t_ner) * 1000
+        persist_inference_metric(task_id, "ner", ner_ms)
 
         # ── ICD code suggestions ──────────────────────────────────────────
         icd_codes = _suggest_icd(entities)
 
         # ── SOAP sections (rule-based extraction + NER) ───────────────────
-        # For production: replace with fine-tuned clinical summariser ONNX model
         soap = _rule_based_soap(transcript, entities)
 
         result = {
@@ -260,9 +297,22 @@ def task_soap_note(self, task_id: str, session_id: str, transcript: str,
         sync_cache_result(cache_key, result)
         log_soap_generated(patient_id, session_id, icd_codes, request_id=task_id)
         _send_callback(callback_url, task_id, result)
+
+        persist_task_result(
+            task_id=task_id, task_type="soap_note",
+            entity_id=patient_id, entity_type="patient",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary={"icd_codes": icd_codes, "session_id": session_id},
+        )
         return result
 
     except Exception as exc:
+        persist_task_result(
+            task_id=task_id, task_type="soap_note",
+            entity_id=patient_id, entity_type="patient",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary=None, error=str(exc),
+        )
         logger.error(f"SOAP task {task_id} failed: {exc}")
         raise self.retry(exc=exc, countdown=3)
 
@@ -335,11 +385,10 @@ def _send_callback(callback_url: str | None, task_id: str, result: dict):
     if not callback_url:
         return
     try:
-        with httpx.Client(timeout=5.0) as client:
-            client.post(
-                callback_url,
-                json={"task_id": task_id, "result": result},
-                headers={"X-Callback-Secret": settings.FASTIFY_CALLBACK_SECRET},
-            )
+        _callback_client.post(
+            callback_url,
+            json={"task_id": task_id, "result": result},
+            headers={"X-Callback-Secret": settings.FASTIFY_CALLBACK_SECRET},
+        )
     except Exception as e:
         logger.warning(f"Callback to {callback_url} failed for task {task_id}: {e}")

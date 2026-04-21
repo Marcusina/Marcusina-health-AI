@@ -20,6 +20,46 @@ from loguru import logger
 CONFIG_DIR = Path("config")
 
 
+def _bound_pattern(p: str) -> str:
+    """
+    Add \\b word boundaries to each top-level alternative in a pattern.
+    Splits on | that are NOT inside parentheses, so grouped patterns
+    like (so much|too much) are left intact.
+
+    Example: "die|just let me die"  →  "\\bdie\\b|\\bjust let me die\\b"
+    Example: "blood|bleed|bleeding" →  "\\bblood\\b|\\bbleed\\b|\\bbleeding\\b"
+    """
+    alts: list[str] = []
+    current: list[str] = []
+    depth = 0
+
+    for ch in p:
+        if ch == '(':
+            depth += 1
+            current.append(ch)
+        elif ch == ')':
+            depth -= 1
+            current.append(ch)
+        elif ch == '|' and depth == 0:
+            alts.append(''.join(current))
+            current = []
+        else:
+            current.append(ch)
+    alts.append(''.join(current))
+
+    bounded: list[str] = []
+    for alt in alts:
+        stripped = alt.strip()
+        if not stripped:
+            bounded.append(stripped)
+            continue
+        pre = r"\b" if stripped[0].isalnum() or stripped[0] == "'" else ""
+        suf = r"\b" if stripped[-1].isalnum() or stripped[-1] == "'" else ""
+        bounded.append(f"{pre}{stripped}{suf}")
+
+    return "|".join(bounded)
+
+
 def _load_json(filename: str) -> dict:
     path = CONFIG_DIR / filename
     if not path.exists():
@@ -43,7 +83,7 @@ def get_red_flags() -> list[str]:
 def get_health_claim_pattern() -> re.Pattern:
     """Compiled regex for health claim detection."""
     patterns = _load_json("health_claim_patterns.json")["patterns"]
-    combined = "|".join(f"(?:{p})" for p in patterns)
+    combined = "|".join(f"(?:{_bound_pattern(p)})" for p in patterns)
     return re.compile(combined, re.IGNORECASE)
 
 
@@ -51,7 +91,7 @@ def get_health_claim_pattern() -> re.Pattern:
 def get_distress_pattern() -> re.Pattern:
     """Compiled regex for mental health distress detection."""
     patterns = _load_json("distress_patterns.json")["patterns"]
-    combined = "|".join(f"(?:{p})" for p in patterns)
+    combined = "|".join(f"(?:{_bound_pattern(p)})" for p in patterns)
     return re.compile(combined, re.IGNORECASE)
 
 

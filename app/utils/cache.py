@@ -1,6 +1,6 @@
 
-
 from __future__ import annotations
+import asyncio
 import json
 import hashlib
 from typing import Optional, Any
@@ -12,22 +12,26 @@ settings = get_settings()
 
 # ── Async client (FastAPI) ────────────────────────────────────────────────────
 _async_redis = None
+_async_redis_lock = asyncio.Lock()
 
 async def _get_async_redis():
     global _async_redis
-    if _async_redis is None:
-        try:
-            import redis.asyncio as aioredis
-            _async_redis = aioredis.from_url(
-                settings.REDIS_URL,
-                encoding="utf-8",
-                decode_responses=True,
-                max_connections=100,
-            )
-            await _async_redis.ping()
-        except Exception as e:
-            logger.warning(f"Async Redis unavailable: {e}")
-            _async_redis = None
+    if _async_redis is not None:
+        return _async_redis
+    async with _async_redis_lock:
+        if _async_redis is None:
+            try:
+                import redis.asyncio as aioredis
+                client = aioredis.from_url(
+                    settings.REDIS_URL,
+                    encoding="utf-8",
+                    decode_responses=True,
+                    max_connections=200,
+                )
+                await client.ping()
+                _async_redis = client
+            except Exception as e:
+                logger.warning(f"Async Redis unavailable: {e}")
     return _async_redis
 
 
@@ -103,5 +107,5 @@ def sync_cache_result(key: str, value: Any, ttl: int = None):
 
 def make_cache_key(prefix: str, *args) -> str:
     payload = json.dumps(args, sort_keys=True, default=str)
-    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    digest = hashlib.blake2b(payload.encode(), digest_size=8).hexdigest()
     return f"health_ai:{prefix}:{digest}"

@@ -7,6 +7,7 @@ Content moderation, recommendations, sentiment — all async via Celery.
 from __future__ import annotations
 import re
 import json
+import time
 import numpy as np
 import httpx
 from loguru import logger
@@ -23,10 +24,16 @@ from app.utils.config_loader import (
     get_distress_pattern,
     get_toxic_keywords,
 )
+from app.db.repositories import persist_task_result, persist_inference_metric
 
 settings = get_settings()
 _presidio_analyzer = None
 _presidio_anonymizer = None
+
+_callback_client = httpx.Client(
+    timeout=5.0,
+    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+)
 
 
 
@@ -69,6 +76,7 @@ def task_moderate(
         _send_callback(callback_url, task_id, cached)
         return cached
 
+    t_start = time.perf_counter()
     try:
         flagged_reasons = []
         text_lower = text.lower()
@@ -77,9 +85,11 @@ def task_moderate(
         session, tokenizer = self.registry.misinfo
         misinfo_score = 0.0
         if session is not None:
-        
             id2label = self.registry.get_id2label("misinfo")
+            t_onnx = time.perf_counter()
             scores = run_onnx_classifier(session, tokenizer, text, id2label=id2label)
+            persist_inference_metric(task_id, "misinfo", (time.perf_counter() - t_onnx) * 1000,
+                                     scores[0]["label"], scores[0]["score"])
             misinfo_score = next((s["score"] for s in scores if s["label"] == "FAKE"), 0.0)
         if misinfo_score >= settings.MISINFO_THRESHOLD:
             flagged_reasons.append(f"Health misinformation detected (score: {misinfo_score:.2f})")
@@ -124,9 +134,23 @@ def task_moderate(
         sync_cache_result(cache_key, result, ttl=settings.CACHE_TTL_MODERATION)
         log_moderation(content_id, author_id, verdict, flagged_reasons, request_id=task_id)
         _send_callback(callback_url, task_id, result)
+
+        persist_task_result(
+            task_id=task_id, task_type="moderate",
+            entity_id=content_id, entity_type="content",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary={"misinfo_score": round(misinfo_score, 3), "toxicity_score": round(toxicity_score, 3)},
+            verdict=verdict,
+        )
         return result
 
     except Exception as exc:
+        persist_task_result(
+            task_id=task_id, task_type="moderate",
+            entity_id=content_id, entity_type="content",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary=None, error=str(exc),
+        )
         logger.error(f"Moderation task {task_id} failed: {exc}")
         raise self.retry(exc=exc, countdown=2)
 
@@ -186,6 +210,7 @@ def task_recommend(
         _send_callback(callback_url, task_id, cached)
         return cached
 
+    t_start = time.perf_counter()
     try:
         interest_text = " ".join(user_interests + user_conditions)
         recommendations = []
@@ -193,8 +218,10 @@ def task_recommend(
 
         if interest_text.strip() and self.registry.faiss_index is not None:
             # ── FAISS semantic search ──────────────────────────────────────
+            t_embed = time.perf_counter()
             query_vec = self.registry.embedder.encode([interest_text]).astype("float32")
             faiss.normalize_L2(query_vec)
+            persist_inference_metric(task_id, "embedder", (time.perf_counter() - t_embed) * 1000)
 
             k = min(limit * 2, self.registry.faiss_index.ntotal)
             scores, indices = self.registry.faiss_index.search(query_vec, k)
@@ -212,7 +239,6 @@ def task_recommend(
                 })
             strategy = "content_based"
 
-            # Boost educational content after consultation
             if context == "after_consultation":
                 recommendations.sort(
                     key=lambda x: x["score"] * (1.3 if x["content_type"] in ["article", "guide"] else 1.0),
@@ -232,9 +258,22 @@ def task_recommend(
 
         sync_cache_result(cache_key, result, ttl=settings.CACHE_TTL_RECOMMEND)
         _send_callback(callback_url, task_id, result)
+
+        persist_task_result(
+            task_id=task_id, task_type="recommend",
+            entity_id=user_id, entity_type="user",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary={"strategy": strategy, "count": len(recommendations[:limit])},
+        )
         return result
 
     except Exception as exc:
+        persist_task_result(
+            task_id=task_id, task_type="recommend",
+            entity_id=user_id, entity_type="user",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary=None, error=str(exc),
+        )
         logger.error(f"Recommendation task {task_id} failed: {exc}")
         raise self.retry(exc=exc, countdown=2)
 
@@ -271,14 +310,23 @@ def task_sentiment(
     text: str,
     callback_url: str | None = None,
 ) -> dict:
+    t_start = time.perf_counter()
     try:
+        cache_key = make_cache_key("sentiment", content_id, text[:100])
+        cached = sync_get_cached(cache_key)
+        if cached:
+            return cached
+
         session, tokenizer = self.registry.sentiment
         sentiment = "neutral"
         scores = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
 
         if session is not None:
             id2label = self.registry.get_id2label("sentiment")
+            t_onnx = time.perf_counter()
             raw_scores = run_onnx_classifier(session, tokenizer, text, id2label=id2label)
+            persist_inference_metric(task_id, "sentiment", (time.perf_counter() - t_onnx) * 1000,
+                                     raw_scores[0]["label"], raw_scores[0]["score"])
             scores = {}
             for item in raw_scores:
                 label = item["label"].lower()
@@ -305,10 +353,25 @@ def task_sentiment(
             "mental_health_concern": mental_health_concern,
         }
 
+        sync_cache_result(cache_key, result, ttl=settings.CACHE_TTL_MODERATION)
         _send_callback(callback_url, task_id, result)
+
+        persist_task_result(
+            task_id=task_id, task_type="sentiment",
+            entity_id=content_id, entity_type="content",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary={"mental_health_concern": mental_health_concern},
+            sentiment=sentiment,
+        )
         return result
 
     except Exception as exc:
+        persist_task_result(
+            task_id=task_id, task_type="sentiment",
+            entity_id=content_id, entity_type="content",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary=None, error=str(exc),
+        )
         logger.error(f"Sentiment task {task_id} failed: {exc}")
         raise self.retry(exc=exc, countdown=2)
 
@@ -338,11 +401,10 @@ def _send_callback(callback_url: str | None, task_id: str, result: dict):
     if not callback_url:
         return
     try:
-        with httpx.Client(timeout=5.0) as client:
-            client.post(
-                callback_url,
-                json={"task_id": task_id, "result": result},
-                headers={"X-Callback-Secret": settings.FASTIFY_CALLBACK_SECRET},
-            )
+        _callback_client.post(
+            callback_url,
+            json={"task_id": task_id, "result": result},
+            headers={"X-Callback-Secret": settings.FASTIFY_CALLBACK_SECRET},
+        )
     except Exception as e:
         logger.warning(f"Callback failed for task {task_id}: {e}")

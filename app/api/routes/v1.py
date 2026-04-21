@@ -1,6 +1,9 @@
 from __future__ import annotations
+import asyncio
+import functools
+import json
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from loguru import logger
 
 from app.core.security import verify_internal_secret
@@ -9,11 +12,30 @@ from app.models.schemas import (
     TranscribeRequest, SOAPRequest, TriageRequest,
     ModerationRequest, RecommendationRequest, SentimentRequest,
     EnqueueResponse, TaskStatusResponse,
+    TaskHistoryItem, InferenceMetricItem, AuditEventItem,
 )
-from app.utils.cache import async_get_cached, make_cache_key
+from app.db import repositories as db
+from app.utils.cache import async_get_cached, async_cache_result, make_cache_key
+from app.core.celery_app import celery_app
 
 settings = get_settings()
 router = APIRouter(dependencies=[Depends(verify_internal_secret)])
+
+_TASK = {
+    "transcribe":       "app.tasks.consultation_tasks.task_transcribe",
+    "triage_emergency": "app.tasks.consultation_tasks.task_triage_emergency",
+    "triage_normal":    "app.tasks.consultation_tasks.task_triage_normal",
+    "soap_note":        "app.tasks.consultation_tasks.task_soap_note",
+    "moderate":         "app.tasks.social_media_tasks.task_moderate",
+    "recommend":        "app.tasks.social_media_tasks.task_recommend",
+    "sentiment":        "app.tasks.social_media_tasks.task_sentiment",
+}
+
+
+async def _enqueue(task_name: str, *, task_id: str, kwargs: dict, **send_kwargs):
+    """Dispatch a Celery task off the event loop using send_task by name."""
+    fn = functools.partial(celery_app.send_task, task_name, kwargs=kwargs, task_id=task_id, **send_kwargs)
+    await asyncio.get_event_loop().run_in_executor(None, fn)
 
 
 # ── Task result polling ───────────────────────────────────────────────────────
@@ -24,21 +46,21 @@ router = APIRouter(dependencies=[Depends(verify_internal_secret)])
     summary="Poll task result (Fastify uses this for sync-style flows)",
 )
 async def get_task_result(task_id: str) -> TaskStatusResponse:
-    """
-    Fastify can poll this after receiving a task_id.
-    Returns the result if ready, or status=pending if still processing.
-    """
-    from app.core.celery_app import celery_app
-    task = celery_app.AsyncResult(task_id)
+    from app.utils.cache import _get_async_redis
+    redis = await _get_async_redis()
+    if redis is not None:
+        raw = await redis.get(f"celery-task-meta-{task_id}")
+        if raw:
+            meta = json.loads(raw)
+            state = meta.get("status", "PENDING")
+            if state == "SUCCESS":
+                return TaskStatusResponse(task_id=task_id, status="complete", result=meta.get("result"))
+            if state == "FAILURE":
+                return TaskStatusResponse(task_id=task_id, status="failed", error=str(meta.get("result")))
+            if state in ("STARTED", "RETRY"):
+                return TaskStatusResponse(task_id=task_id, status="processing")
 
-    if task.state == "SUCCESS":
-        return TaskStatusResponse(task_id=task_id, status="complete", result=task.result)
-    elif task.state == "FAILURE":
-        return TaskStatusResponse(task_id=task_id, status="failed", error=str(task.info))
-    elif task.state in ("STARTED", "RETRY"):
-        return TaskStatusResponse(task_id=task_id, status="processing")
-    else:
-        return TaskStatusResponse(task_id=task_id, status="pending")
+    return TaskStatusResponse(task_id=task_id, status="pending")
 
 
 # ================================================================ #
@@ -48,26 +70,21 @@ async def get_task_result(task_id: str) -> TaskStatusResponse:
 @router.post("/consultation/transcribe", response_model=EnqueueResponse,
              summary="Transcribe consultation audio (async)")
 async def transcribe(request: TranscribeRequest) -> EnqueueResponse:
-    # Fast cache check before even enqueuing
     cache_key = make_cache_key("transcribe", request.session_id)
     cached = await async_get_cached(cache_key)
     if cached:
         return EnqueueResponse(task_id="cached", status="complete", result=cached)
 
     task_id = str(uuid.uuid4())
-    from app.tasks.consultation_tasks import task_transcribe
-    task_transcribe.apply_async(
-        kwargs=dict(
-            task_id=task_id,
-            session_id=request.session_id,
-            audio_base64=request.audio_base64,
-            audio_format=request.audio_format,
-            language=request.language,
-            speaker=request.speaker,
-            callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
-        ),
+    await _enqueue(_TASK["transcribe"], task_id=task_id, kwargs=dict(
         task_id=task_id,
-    )
+        session_id=request.session_id,
+        audio_base64=request.audio_base64,
+        audio_format=request.audio_format,
+        language=request.language,
+        speaker=request.speaker,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
     logger.info(f"Enqueued transcription task {task_id} for session {request.session_id}")
     return EnqueueResponse(task_id=task_id, status="queued")
 
@@ -84,21 +101,16 @@ async def triage(request: TriageRequest) -> EnqueueResponse:
         "seizure", "unconscious", "suicidal", "severe bleeding",
     ])
 
-    from app.tasks.consultation_tasks import task_triage_emergency, task_triage_normal
-    task_fn = task_triage_emergency if is_emergency else task_triage_normal
-    task_fn.apply_async(
-        kwargs=dict(
-            task_id=task_id,
-            patient_id=request.patient_id,
-            symptoms=request.symptoms,
-            age=request.age,
-            vital_signs=request.vital_signs,
-            medical_history=request.medical_history or [],
-            callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
-        ),
+    task_name = _TASK["triage_emergency"] if is_emergency else _TASK["triage_normal"]
+    await _enqueue(task_name, task_id=task_id, kwargs=dict(
         task_id=task_id,
-        priority=10 if is_emergency else 5,
-    )
+        patient_id=request.patient_id,
+        symptoms=request.symptoms,
+        age=request.age,
+        vital_signs=request.vital_signs,
+        medical_history=request.medical_history or [],
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ), priority=10 if is_emergency else 5)
     logger.info(f"Enqueued {'EMERGENCY' if is_emergency else 'normal'} triage {task_id} for patient {request.patient_id}")
     return EnqueueResponse(task_id=task_id, status="queued", priority="emergency" if is_emergency else "normal")
 
@@ -112,19 +124,15 @@ async def soap_note(request: SOAPRequest) -> EnqueueResponse:
         return EnqueueResponse(task_id="cached", status="complete", result=cached)
 
     task_id = str(uuid.uuid4())
-    from app.tasks.consultation_tasks import task_soap_note
-    task_soap_note.apply_async(
-        kwargs=dict(
-            task_id=task_id,
-            session_id=request.session_id,
-            transcript=request.transcript,
-            patient_id=request.patient_id,
-            doctor_id=request.doctor_id,
-            specialty=request.specialty,
-            callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
-        ),
+    await _enqueue(_TASK["soap_note"], task_id=task_id, kwargs=dict(
         task_id=task_id,
-    )
+        session_id=request.session_id,
+        transcript=request.transcript,
+        patient_id=request.patient_id,
+        doctor_id=request.doctor_id,
+        specialty=request.specialty,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
     return EnqueueResponse(task_id=task_id, status="queued")
 
 
@@ -141,18 +149,14 @@ async def moderate(request: ModerationRequest) -> EnqueueResponse:
         return EnqueueResponse(task_id="cached", status="complete", result=cached)
 
     task_id = str(uuid.uuid4())
-    from app.tasks.social_media_tasks import task_moderate
-    task_moderate.apply_async(
-        kwargs=dict(
-            task_id=task_id,
-            content_id=request.content_id,
-            content_type=request.content_type,
-            text=request.text,
-            author_id=request.author_id,
-            callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
-        ),
+    await _enqueue(_TASK["moderate"], task_id=task_id, kwargs=dict(
         task_id=task_id,
-    )
+        content_id=request.content_id,
+        content_type=request.content_type,
+        text=request.text,
+        author_id=request.author_id,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
     return EnqueueResponse(task_id=task_id, status="queued")
 
 
@@ -166,34 +170,84 @@ async def recommend(request: RecommendationRequest) -> EnqueueResponse:
         return EnqueueResponse(task_id="cached", status="complete", result=cached)
 
     task_id = str(uuid.uuid4())
-    from app.tasks.social_media_tasks import task_recommend
-    task_recommend.apply_async(
-        kwargs=dict(
-            task_id=task_id,
-            user_id=request.user_id,
-            context=request.context,
-            user_interests=request.user_interests,
-            user_conditions=request.user_conditions,
-            limit=request.limit,
-            callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
-        ),
+    await _enqueue(_TASK["recommend"], task_id=task_id, kwargs=dict(
         task_id=task_id,
-    )
+        user_id=request.user_id,
+        context=request.context,
+        user_interests=request.user_interests,
+        user_conditions=request.user_conditions,
+        limit=request.limit,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
     return EnqueueResponse(task_id=task_id, status="queued")
 
 
 @router.post("/social/sentiment", response_model=EnqueueResponse,
              summary="Sentiment + mental health concern analysis (async)")
 async def sentiment(request: SentimentRequest) -> EnqueueResponse:
+    cache_key = make_cache_key("sentiment", request.content_id, request.text[:100])
+    cached = await async_get_cached(cache_key)
+    if cached:
+        return EnqueueResponse(task_id="cached", status="complete", result=cached)
+
     task_id = str(uuid.uuid4())
-    from app.tasks.social_media_tasks import task_sentiment
-    task_sentiment.apply_async(
-        kwargs=dict(
-            task_id=task_id,
-            content_id=request.content_id,
-            text=request.text,
-            callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
-        ),
+    await _enqueue(_TASK["sentiment"], task_id=task_id, kwargs=dict(
         task_id=task_id,
-    )
+        content_id=request.content_id,
+        text=request.text,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
     return EnqueueResponse(task_id=task_id, status="queued")
+
+
+# ================================================================ #
+# Database query endpoints                                          #
+# ================================================================ #
+
+@router.get(
+    "/history/tasks",
+    response_model=list[TaskHistoryItem],
+    summary="Persistent task history from PostgreSQL",
+)
+async def task_history(
+    task_type: str | None = None,
+    entity_id: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict]:
+    return await db.get_task_history(
+        task_type=task_type,
+        entity_id=entity_id,
+        status=status,
+        limit=min(limit, 100),
+        offset=offset,
+    )
+
+
+@router.get(
+    "/history/audit",
+    response_model=list[AuditEventItem],
+    summary="Queryable audit log from PostgreSQL",
+)
+async def audit_history(
+    action: str | None = None,
+    entity_id: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict]:
+    return await db.get_audit_events(
+        action=action,
+        entity_id=entity_id,
+        limit=min(limit, 100),
+        offset=offset,
+    )
+
+
+@router.get(
+    "/metrics/inference",
+    response_model=list[InferenceMetricItem],
+    summary="Per-model inference latency and score stats",
+)
+async def inference_metrics() -> list[dict]:
+    return await db.get_inference_metrics_summary()

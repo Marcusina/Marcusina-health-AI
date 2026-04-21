@@ -30,11 +30,11 @@ class Settings(BaseSettings):
     WORKER_CONNECTIONS: int = 1000
 
     # ── Security ─────────────────────────────────────────────────────────────
-    API_SECRET_KEY: str = "change-me-in-production-use-32-char-min"
+    # No defaults — app refuses to start if these are missing from .env
+    API_SECRET_KEY: str
+    FASTIFY_CALLBACK_SECRET: str
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:4000"]
-    # Fastify callback URL for async task results
     FASTIFY_CALLBACK_URL: str = "http://localhost:3000/internal/ai-callback"
-    FASTIFY_CALLBACK_SECRET: str = "change-me-callback-secret"
 
     # ── Redis cluster (cache + Celery result backend) ─────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     TRIAGE_EMERGENCY_THRESHOLD: float = 0.85
     TRIAGE_URGENT_THRESHOLD: float = 0.60
 
+    # ── PostgreSQL (AI-layer persistence) ────────────────────────────────────────
+    # No defaults — credentials must come from .env only, never from source code
+    DATABASE_URL: str       # postgresql+asyncpg://... (FastAPI / asyncpg driver)
+    DATABASE_SYNC_URL: str  # postgresql+psycopg2://... (Celery / psycopg2 driver)
+
     # ── Request batching (dynamic batching for throughput) ────────────────────
     # Collect this many requests before running a batched inference pass.
     # Lower = lower latency. Higher = higher throughput.
@@ -105,3 +110,4 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
+

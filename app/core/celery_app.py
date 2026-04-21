@@ -2,6 +2,7 @@
 
 from celery import Celery
 from celery.schedules import crontab
+from kombu import Queue, Exchange
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -41,6 +42,8 @@ celery_app.conf.update(
     # worker_concurrency is set via CLI: celery -A app.core.celery_app worker
     # --concurrency=N (set N = CPU cores for CPU-bound inference tasks)
     worker_prefetch_multiplier=1,   # Pull one task at a time (fair for long tasks)
+    worker_max_tasks_per_child=1000,  # Recycle workers to prevent memory fragmentation
+    broker_connection_retry_on_startup=True,
     task_acks_late=True,            # Ack only after successful completion
     task_reject_on_worker_lost=True,
 
@@ -53,12 +56,12 @@ celery_app.conf.update(
     task_default_retry_delay=2,     # seconds
 
     # ── Queue definitions ──────────────────────────────────────────────────
-    task_queues={
-        settings.CELERY_QUEUE_EMERGENCY: {"exchange": "emergency", "routing_key": "emergency"},
-        settings.CELERY_QUEUE_REALTIME:  {"exchange": "realtime",  "routing_key": "realtime"},
-        settings.CELERY_QUEUE_NORMAL:    {"exchange": "normal",    "routing_key": "normal"},
-        settings.CELERY_QUEUE_BATCH:     {"exchange": "batch",     "routing_key": "batch"},
-    },
+    task_queues=[
+        Queue(settings.CELERY_QUEUE_EMERGENCY, Exchange("emergency"), routing_key="emergency"),
+        Queue(settings.CELERY_QUEUE_REALTIME,  Exchange("realtime"),  routing_key="realtime"),
+        Queue(settings.CELERY_QUEUE_NORMAL,    Exchange("normal"),    routing_key="normal"),
+        Queue(settings.CELERY_QUEUE_BATCH,     Exchange("batch"),     routing_key="batch"),
+    ],
 
     # ── Beat scheduler (periodic tasks) ────────────────────────────────────
     beat_schedule={

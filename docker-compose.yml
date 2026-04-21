@@ -1,5 +1,3 @@
-version: "3.9"
-
 # =============================================================================
 # Health AI — Full Production Stack
 # Linux server deployment (Ubuntu 22.04 recommended)
@@ -12,6 +10,7 @@ version: "3.9"
 #   worker_batch     → Celery worker — recommendations, analytics
 #   rabbitmq         → Message broker (task queue)
 #   redis            → Cache + Celery result backend
+#   postgres         → AI-layer persistence (tasks, audit, inference metrics)
 #   flower           → Celery monitoring UI
 #   nginx            → Reverse proxy + rate limiting
 # =============================================================================
@@ -23,7 +22,7 @@ x-worker-base: &worker-base
     - API_SECRET_KEY=${API_SECRET_KEY}
     - REDIS_URL=redis://redis:6379/0
     - REDIS_RESULT_URL=redis://redis:6379/1
-    - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672//
+    - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//
     - FASTIFY_CALLBACK_URL=${FASTIFY_CALLBACK_URL}
     - FASTIFY_CALLBACK_SECRET=${FASTIFY_CALLBACK_SECRET}
     - MODELS_DIR=/app/models
@@ -31,12 +30,16 @@ x-worker-base: &worker-base
     - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base}
     - WHISPER_COMPUTE_TYPE=int8
     - WHISPER_DEVICE=cpu
+    - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/healthai_db
+    - DATABASE_SYNC_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/healthai_db
   volumes:
     - ai_models:/app/models
   depends_on:
     rabbitmq:
       condition: service_healthy
     redis:
+      condition: service_healthy
+    postgres:
       condition: service_healthy
   restart: unless-stopped
   networks:
@@ -97,7 +100,6 @@ services:
 
   worker_normal:
     <<: *worker-base
-    container_name: health_worker_normal
     command: >
       celery -A app.core.celery_app worker
         --queues normal
@@ -123,6 +125,27 @@ services:
     container_name: health_celery_beat
     command: celery -A app.core.celery_app beat --loglevel info
 
+  # ── PostgreSQL (AI-layer persistence) ───────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: health_postgres
+    environment:
+      POSTGRES_DB: healthai_db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d healthai_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - health_network
+
   # ── RabbitMQ (message broker) ─────────────────────────────────────────────
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -131,8 +154,8 @@ services:
       - "5672:5672"
       - "15672:15672"   # Management UI
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 15s
@@ -172,7 +195,7 @@ services:
     command: >
       celery -A app.core.celery_app flower
         --port=5555
-        --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASS:-admin}
+        --basic_auth=${FLOWER_USER}:${FLOWER_PASS}
     ports:
       - "5555:5555"
 
@@ -194,6 +217,7 @@ volumes:
   ai_models:
   rabbitmq_data:
   redis_data:
+  postgres_data:
 
 networks:
   health_network:

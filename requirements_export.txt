@@ -1,0 +1,8 @@
+# Export-time only — run on dev machine, NOT inside Docker
+# Usage: pip install -r requirements_export.txt
+#        python scripts/export_onnx.py
+# This pulls in torch + CUDA packages (~2GB). Never add to Dockerfile.
+optimum[onnxruntime]==1.20.0
+transformers==4.40.1
+tokenizers==0.19.1
+sentencepiece==0.2.0

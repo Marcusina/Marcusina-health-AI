@@ -29,12 +29,21 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: load models. Shutdown: nothing (GC handles cleanup)."""
+    """Startup: init DB tables. Shutdown: dispose engine."""
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION} [{settings.ENVIRONMENT}]")
-    # Note: In Celery worker mode, models are loaded by the ModelTask base class
-    # on first task execution, not here. FastAPI workers stay lightweight.
+    try:
+        from app.db.engine import init_db, async_engine
+        await init_db()
+        logger.info("Database tables ready.")
+    except Exception as e:
+        logger.warning(f"Database init failed (service will run without DB persistence): {e}")
     logger.info("FastAPI worker ready. AI inference handled by Celery workers.")
     yield
+    try:
+        from app.db.engine import async_engine
+        await async_engine.dispose()
+    except Exception:
+        pass
     logger.info("FastAPI worker shutting down.")
 
 
@@ -70,8 +79,10 @@ app.add_middleware(
     allow_headers=["X-AI-Secret", "Content-Type"],
 )
 
-# Prometheus metrics
-Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+# Prometheus metrics — exclude /health to avoid counter spam at 5k RPS
+Instrumentator(
+    excluded_handlers=["/health", "/metrics", "/"],
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 app.include_router(v1_router, prefix="/api/v1")
 

@@ -9,6 +9,7 @@ from loguru import logger
 from typing import Optional
 
 import numpy as np
+from scipy.special import softmax
 from faster_whisper import WhisperModel
 from transformers import AutoTokenizer
 import onnxruntime as ort
@@ -33,6 +34,7 @@ def _make_ort_session(model_path: str) -> "ort.InferenceSession":
 
     # Store path on session so run_onnx_classifier can find config.json
     session._model_path = model_path
+    session._valid_input_names = frozenset(i.name for i in session.get_inputs())
     return session
 
 class ModelRegistry:
@@ -230,9 +232,6 @@ def run_onnx_classifier(
     id2label must be passed in explicitly from the registry loader —
     do not rely on session._model_path which is not guaranteed to be set.
     """
-    import numpy as np
-    from scipy.special import softmax
-
     inputs = tokenizer(
         text,
         return_tensors="np",
@@ -241,7 +240,7 @@ def run_onnx_classifier(
         padding=True,
     )
 
-    valid_names = {i.name for i in session.get_inputs()}
+    valid_names = getattr(session, "_valid_input_names", frozenset(i.name for i in session.get_inputs()))
     ort_inputs = {
     k: v.astype("int64") if v.dtype.kind == "i" else v
     for k, v in inputs.items()
