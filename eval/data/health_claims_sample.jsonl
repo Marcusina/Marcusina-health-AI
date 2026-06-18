@@ -1,0 +1,24 @@
+{"text": "Vaccines cause autism in children.", "label": "misinfo", "source": "curated"}
+{"text": "Drinking bleach or disinfectant can cure COVID-19.", "label": "misinfo", "source": "curated"}
+{"text": "Vitamin C megadoses cure the common cold instantly.", "label": "misinfo", "source": "curated"}
+{"text": "5G mobile networks spread the coronavirus.", "label": "misinfo", "source": "curated"}
+{"text": "You only use 10 percent of your brain.", "label": "misinfo", "source": "curated"}
+{"text": "Antibiotics are an effective treatment for viral infections like the flu.", "label": "misinfo", "source": "curated"}
+{"text": "Cancer can be cured by following an alkaline diet.", "label": "misinfo", "source": "curated"}
+{"text": "Essential oils can replace chemotherapy for treating tumors.", "label": "misinfo", "source": "curated"}
+{"text": "A full-body cleanse flushes toxins and prevents all disease.", "label": "misinfo", "source": "curated"}
+{"text": "Microwaving food destroys all of its nutrients and makes it radioactive.", "label": "misinfo", "source": "curated"}
+{"text": "Sugar causes children to become hyperactive.", "label": "misinfo", "source": "curated"}
+{"text": "Cracking your knuckles causes arthritis.", "label": "misinfo", "source": "curated"}
+{"text": "Regular handwashing reduces the spread of infectious disease.", "label": "reliable", "source": "curated"}
+{"text": "Smoking tobacco increases the risk of lung cancer.", "label": "reliable", "source": "curated"}
+{"text": "Regular physical activity lowers the risk of cardiovascular disease.", "label": "reliable", "source": "curated"}
+{"text": "Insulin is used to manage blood sugar levels in people with diabetes.", "label": "reliable", "source": "curated"}
+{"text": "Seat belts reduce the risk of death in car crashes.", "label": "reliable", "source": "curated"}
+{"text": "Staying hydrated by drinking water supports normal body function.", "label": "reliable", "source": "curated"}
+{"text": "A balanced diet with fruits and vegetables supports good health.", "label": "reliable", "source": "curated"}
+{"text": "Measles can be prevented by the MMR vaccine.", "label": "reliable", "source": "curated"}
+{"text": "High blood pressure increases the risk of stroke.", "label": "reliable", "source": "curated"}
+{"text": "Sunscreen helps protect skin from UV radiation damage.", "label": "reliable", "source": "curated"}
+{"text": "Folic acid during pregnancy reduces the risk of neural tube defects.", "label": "reliable", "source": "curated"}
+{"text": "Sleep is important for memory consolidation and overall health.", "label": "reliable", "source": "curated"}

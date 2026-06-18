@@ -14,6 +14,7 @@ celery_app = Celery(
     include=[
         "app.tasks.consultation_tasks",
         "app.tasks.social_media_tasks",
+        "app.tasks.support_tasks",
     ],
 )
 
@@ -36,6 +37,7 @@ celery_app.conf.update(
         "app.tasks.social_media_tasks.task_moderate":         {"queue": settings.CELERY_QUEUE_NORMAL},
         "app.tasks.social_media_tasks.task_recommend":        {"queue": settings.CELERY_QUEUE_BATCH},
         "app.tasks.social_media_tasks.task_sentiment":        {"queue": settings.CELERY_QUEUE_BATCH},
+        "app.tasks.support_tasks.task_support_assist":        {"queue": settings.CELERY_QUEUE_NORMAL},
     },
 
     # ── Concurrency ────────────────────────────────────────────────────────

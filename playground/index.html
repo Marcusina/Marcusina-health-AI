@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Marcusina AI — Local Playground</title>
+<style>
+  :root {
+    --bg:#0f1419; --panel:#1a2029; --panel2:#232b36; --line:#2c3644;
+    --text:#e6edf3; --muted:#8b97a7; --accent:#3b82f6;
+    --green:#22c55e; --amber:#f59e0b; --red:#ef4444; --violet:#8b5cf6;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .sub { color:var(--muted); font-size:12px; }
+  #llm { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px;
+         padding:6px 12px; border-radius:20px; background:var(--panel2); border:1px solid var(--line); cursor:pointer; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .dot.on { background:var(--green); } .dot.off { background:var(--amber); }
+  .wrap { display:flex; min-height:calc(100vh - 53px); }
+  nav { width:190px; background:var(--panel); border-right:1px solid var(--line); padding:10px; flex-shrink:0; }
+  nav button { display:block; width:100%; text-align:left; padding:9px 12px; margin-bottom:3px;
+               background:none; border:none; color:var(--muted); border-radius:8px; cursor:pointer; font-size:13px; }
+  nav button:hover { background:var(--panel2); color:var(--text); }
+  nav button.active { background:var(--accent); color:#fff; }
+  nav .group { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.05em; margin:14px 8px 6px; }
+  main { flex:1; padding:24px 28px; max-width:880px; }
+  .tab { display:none; } .tab.active { display:block; }
+  h2 { margin:0 0 4px; font-size:18px; }
+  .desc { color:var(--muted); margin:0 0 18px; font-size:13px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:12px 0 5px; }
+  input[type=text], input[type=number], textarea, select {
+    width:100%; padding:10px 12px; background:var(--panel2); border:1px solid var(--line);
+    color:var(--text); border-radius:8px; font:inherit; resize:vertical; }
+  textarea { min-height:90px; }
+  .row { display:flex; gap:12px; } .row > div { flex:1; }
+  .opts { display:flex; gap:18px; align-items:center; margin-top:12px; font-size:13px; color:var(--muted); }
+  .opts label { display:flex; align-items:center; gap:6px; margin:0; }
+  button.run { margin-top:16px; padding:10px 22px; background:var(--accent); color:#fff;
+               border:none; border-radius:8px; font-weight:600; cursor:pointer; }
+  button.run:disabled { opacity:.5; cursor:default; }
+  .result { margin-top:20px; display:none; }
+  .result.show { display:block; }
+  .badge { display:inline-block; padding:4px 12px; border-radius:6px; font-weight:600; font-size:13px; margin-bottom:10px; }
+  .b-green{background:rgba(34,197,94,.15);color:var(--green);border:1px solid rgba(34,197,94,.3);}
+  .b-amber{background:rgba(245,158,11,.15);color:var(--amber);border:1px solid rgba(245,158,11,.3);}
+  .b-red{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3);}
+  .b-blue{background:rgba(59,130,246,.15);color:var(--accent);border:1px solid rgba(59,130,246,.3);}
+  .b-violet{background:rgba(139,92,246,.15);color:var(--violet);border:1px solid rgba(139,92,246,.3);}
+  .cards .card { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:8px; }
+  .card .t { font-weight:600; } .card .m { color:var(--muted); font-size:12px; margin-top:3px; }
+  pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:14px;
+        overflow:auto; font-size:12px; color:#c9d4e0; max-height:340px; }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px; margin-top:10px; }
+  .hint { background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.25); border-radius:8px;
+          padding:10px 14px; font-size:12px; color:var(--amber); margin-bottom:16px; }
+  .kv { margin:6px 0; } .kv b { color:var(--text); } .kv span { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>🏥 Marcusina AI — Local Playground</h1>
+    <div class="sub">in-process · no DB/queue needed · localhost only</div>
+  </div>
+  <div id="llm" onclick="checkLLM()"><span class="dot" id="llmdot"></span><span id="llmtxt">checking LLM…</span></div>
+</header>
+<div class="wrap">
+  <nav>
+    <div class="group">Tier 1 · safety (instant)</div>
+    <button data-tab="triage" class="active">Triage</button>
+    <button data-tab="moderate">Moderation</button>
+    <div class="group">LLM-powered</div>
+    <button data-tab="misinfo">Misinfo (RAG)</button>
+    <button data-tab="soap">SOAP note</button>
+    <button data-tab="summary">Visit summary</button>
+    <button data-tab="support">Support assist</button>
+    <div class="group">Search · recommend</div>
+    <button data-tab="search">Semantic search</button>
+    <button data-tab="recommend">Recommendations</button>
+    <button data-tab="index">Add content</button>
+  </nav>
+  <main>
+    <!-- TRIAGE -->
+    <section class="tab active" id="tab-triage">
+      <h2>Triage</h2>
+      <p class="desc">Red-flag rules (instant, no GPU) → emergency. Non-red-flag cases get an LLM urgency opinion. Works with the LLM offline (rules only).</p>
+      <label>Symptoms</label>
+      <textarea id="tr-symptoms">severe chest pain radiating to the left arm, short of breath</textarea>
+      <div class="row">
+        <div><label>Age</label><input type="number" id="tr-age" value="58"></div>
+        <div><label>Medical history (comma-separated)</label><input type="text" id="tr-hist" value="hypertension"></div>
+      </div>
+      <div class="opts"><label><input type="checkbox" id="tr-llm" checked> use LLM for non-red-flag cases</label></div>
+      <button class="run" onclick="runTriage()">Run triage</button>
+      <div class="result" id="tr-res"></div>
+    </section>
+
+    <!-- MODERATE -->
+    <section class="tab" id="tab-moderate">
+      <h2>Content moderation</h2>
+      <p class="desc">Toxicity (curated keywords) + distress detection in one call. Distress patterns escalate to a human; with the LLM off it fails safe (over-escalates).</p>
+      <label>Text</label>
+      <textarea id="mo-text">you quack, you should just give up</textarea>
+      <div class="row">
+        <div><label>Context</label>
+          <select id="mo-ctx"><option>post</option><option>comment</option><option>chat</option><option>review</option><option>report</option></select></div>
+        <div class="opts" style="margin-top:28px;"><label><input type="checkbox" id="mo-deep"> deep scan (LLM toxicity)</label></div>
+      </div>
+      <button class="run" onclick="runModerate()">Run moderation</button>
+      <div class="result" id="mo-res"></div>
+    </section>
+
+    <!-- MISINFO -->
+    <section class="tab" id="tab-misinfo">
+      <h2>Misinformation check (RAG)</h2>
+      <p class="desc">Retrieves trusted-source evidence (WHO/CDC/…) and the LLM judges the claim against it, with citations. <b>Needs a local LLM</b> — without one it returns <i>unverified</i> + the evidence for human review.</p>
+      <label>Health claim</label>
+      <textarea id="mi-text">vaccines cause autism in children</textarea>
+      <button class="run" onclick="runMisinfo()">Check claim</button>
+      <div class="result" id="mi-res"></div>
+    </section>
+
+    <!-- SOAP -->
+    <section class="tab" id="tab-soap">
+      <h2>SOAP note generation</h2>
+      <p class="desc">From a consultation transcript → SOAP sections + extracted entities + ICD codes (mapped from config, not invented). <b>Needs a local LLM</b>; degrades to a marked draft otherwise.</p>
+      <label>Transcript</label>
+      <textarea id="so-text" style="min-height:150px;">Doctor: What brings you in today?
+Patient: I've had a cough for about three days and a mild fever. No chest pain.
+Doctor: Any shortness of breath? Patient: No. I took some paracetamol.
+Doctor: Your temperature is 37.9. Chest sounds clear. Likely a viral infection. Rest, fluids, and paracetamol as needed. Come back if it worsens.</textarea>
+      <label>Specialty (optional)</label>
+      <input type="text" id="so-spec" value="General Practitioner">
+      <button class="run" onclick="runSoap()">Generate SOAP</button>
+      <div class="result" id="so-res"></div>
+    </section>
+
+    <!-- SUMMARY -->
+    <section class="tab" id="tab-summary">
+      <h2>Patient visit summary</h2>
+      <p class="desc">Plain-language summary for the patient, with next steps and when to seek help. <b>Needs a local LLM.</b></p>
+      <label>Transcript</label>
+      <textarea id="su-text" style="min-height:150px;">Doctor: Your blood pressure is a bit high at 150 over 95. Let's start a low dose of medication and reduce salt. Patient: Okay. Doctor: Walk 30 minutes most days and come back in 4 weeks to recheck.</textarea>
+      <button class="run" onclick="runSummary()">Generate summary</button>
+      <div class="result" id="su-res"></div>
+    </section>
+
+    <!-- SUPPORT -->
+    <section class="tab" id="tab-support">
+      <h2>Support assist</h2>
+      <p class="desc">Routes a ticket + drafts a reply for a human agent. Never gives medical advice; a distress pattern forces urgent + escalation even with the LLM off.</p>
+      <label>Subject</label>
+      <input type="text" id="sp-subj" value="Charged twice this month">
+      <label>Message</label>
+      <textarea id="sp-msg">I was billed twice for my subscription and I want a refund. This is frustrating.</textarea>
+      <button class="run" onclick="runSupport()">Draft reply</button>
+      <div class="result" id="sp-res"></div>
+    </section>
+
+    <!-- SEARCH -->
+    <section class="tab" id="tab-search">
+      <h2>Semantic search</h2>
+      <p class="desc">Embedding search over the content index (seeded with demo articles; add your own in “Add content”). Runs on CPU, no LLM.</p>
+      <label>Query</label>
+      <input type="text" id="se-q" value="how do I keep my blood sugar under control">
+      <div class="row">
+        <div><label>Results (k)</label><input type="number" id="se-k" value="5"></div>
+        <div><label>Type filter (optional)</label><input type="text" id="se-type" placeholder="article / guide …"></div>
+      </div>
+      <button class="run" onclick="runSearch()">Search</button>
+      <div class="result" id="se-res"></div>
+    </section>
+
+    <!-- RECOMMEND -->
+    <section class="tab" id="tab-recommend">
+      <h2>Recommendations</h2>
+      <p class="desc">Personalized content from a user profile, with a reason per item. CPU, no LLM.</p>
+      <div class="row">
+        <div><label>Interests (comma-separated)</label><input type="text" id="re-int" value="diabetes, nutrition"></div>
+        <div><label>Conditions (comma-separated)</label><input type="text" id="re-cond" value="hypertension"></div>
+      </div>
+      <div class="row">
+        <div><label>Context</label>
+          <select id="re-ctx"><option value="">(none)</option><option>after_consultation</option></select></div>
+        <div><label>k</label><input type="number" id="re-k" value="5"></div>
+      </div>
+      <button class="run" onclick="runRecommend()">Recommend</button>
+      <div class="result" id="re-res"></div>
+    </section>
+
+    <!-- INDEX -->
+    <section class="tab" id="tab-index">
+      <h2>Add your content</h2>
+      <p class="desc">Push your own items into the index, then search/recommend over them. This is how the backend would feed real content (the AI service never reads your DB).</p>
+      <div class="hint">Paste a JSON array: <code>[{"id":"x1","text":"title + body","type":"article","metadata":{"title":"…"}}]</code></div>
+      <label>Items (JSON)</label>
+      <textarea id="ix-json" style="min-height:160px;">[
+  {"id":"my-1","text":"Five practical tips to lower your cholesterol through diet and daily walking","type":"article","metadata":{"title":"Lowering cholesterol","topic":"cardiovascular"}},
+  {"id":"my-2","text":"Understanding your blood test results: what cholesterol, glucose and HbA1c mean","type":"guide","metadata":{"title":"Reading your blood tests","topic":"diagnostics"}}
+]</textarea>
+      <button class="run" onclick="runIndex()">Add to index</button>
+      <div class="result" id="ix-res"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const list = s => s.split(',').map(x=>x.trim()).filter(Boolean);
+
+// nav
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); $('tab-'+b.dataset.tab).classList.add('active');
+});
+
+async function post(path, body) {
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  return r.json();
+}
+function show(el, headlineHtml, data) {
+  el.innerHTML = headlineHtml + '<details open><summary>raw JSON</summary><pre>'+
+    JSON.stringify(data,null,2).replace(/</g,'&lt;')+'</pre></details>';
+  el.classList.add('show');
+}
+function badge(cls, txt){ return '<span class="badge '+cls+'">'+txt+'</span> '; }
+function kv(k,v){ return '<div class="kv"><b>'+k+':</b> <span>'+(v??'—')+'</span></div>'; }
+async function busy(btn, fn){ btn.disabled=true; const t=btn.textContent; btn.textContent='Running…';
+  try{ await fn(); } finally { btn.disabled=false; btn.textContent=t; } }
+
+// LLM status
+async function checkLLM(){
+  $('llmtxt').textContent='checking…';
+  try {
+    const h = await (await fetch('/play/llm-health')).json();
+    if (h.ok) { $('llmdot').className='dot on'; $('llmtxt').textContent='LLM online · '+(h.configured_model||'?'); }
+    else { $('llmdot').className='dot off'; $('llmtxt').textContent='LLM offline (rules/degraded only)'; }
+  } catch(e){ $('llmdot').className='dot off'; $('llmtxt').textContent='LLM offline'; }
+}
+checkLLM();
+
+const URG = {emergency:'b-red',urgent:'b-amber',semi_urgent:'b-amber',non_urgent:'b-blue',self_care:'b-green'};
+function runTriage(){ busy(event.target, async ()=>{
+  const d = await post('/play/triage',{symptoms:$('tr-symptoms').value, age:Number($('tr-age').value)||null,
+    medical_history:list($('tr-hist').value), use_llm:$('tr-llm').checked});
+  if(d.error) return show($('tr-res'), badge('b-red','error'), d);
+  let h = badge(URG[d.urgency_level]||'b-blue', d.urgency_level.toUpperCase()) +
+    (d.red_flag_symptoms?.length? badge('b-red','red flags: '+d.red_flag_symptoms.join(', ')):'') +
+    kv('specialty', d.recommended_specialty) + kv('reasoning', d.reasoning) + kv('llm used', d.llm_used);
+  show($('tr-res'), h, d);
+});}
+
+const ACT = {allow:'b-green',flag:'b-amber',block:'b-red'};
+function runModerate(){ busy(event.target, async ()=>{
+  const d = await post('/play/moderate',{text:$('mo-text').value, context:$('mo-ctx').value, deep_scan:$('mo-deep').checked});
+  if(d.error) return show($('mo-res'), badge('b-red','error'), d);
+  let h = badge(ACT[d.action], 'action: '+d.action) +
+    badge(d.toxicity.label==='clean'?'b-green':'b-red','toxicity: '+d.toxicity.label) +
+    (d.distress.escalate_to_human? badge('b-red','⚠ DISTRESS → human ('+d.distress.severity+')'):badge('b-green','no distress'));
+  show($('mo-res'), h, d);
+});}
+
+const VER = {supported:'b-green',contradicted:'b-red',unsupported:'b-amber',not_health_claim:'b-blue',unverified:'b-amber'};
+function runMisinfo(){ busy(event.target, async ()=>{
+  const d = await post('/play/misinfo',{text:$('mi-text').value, k:4});
+  if(d.error) return show($('mi-res'), badge('b-red','error'), d);
+  let h = badge(VER[d.verdict]||'b-blue', d.verdict) + (d.flag?badge('b-amber','→ human review'):'') +
+    kv('confidence', d.confidence) + kv('rationale', d.rationale);
+  if(d.citations?.length){ h+='<div class="cards">'+d.citations.map(c=>
+    '<div class="card"><div class="t">'+c.source+'</div><div class="m">'+c.snippet+'</div></div>').join('')+'</div>'; }
+  show($('mi-res'), h, d);
+});}
+
+function runSoap(){ busy(event.target, async ()=>{
+  const d = await post('/play/soap',{transcript:$('so-text').value, specialty:$('so-spec').value||null});
+  if(d.error) return show($('so-res'), badge('b-red','error'), d);
+  let h = (d.degraded?badge('b-amber','DEGRADED (LLM off)'):badge('b-green','generated')) +
+    kv('ICD', (d.icd_suggestions||[]).join(', '));
+  const s=d.soap_note||{};
+  h += '<div class="cards">'+['subjective','objective','assessment','plan'].map(k=>
+    '<div class="card"><div class="t">'+k[0].toUpperCase()+k.slice(1)+'</div><div class="m">'+(s[k]||'')+'</div></div>').join('')+'</div>';
+  show($('so-res'), h, d);
+});}
+
+function runSummary(){ busy(event.target, async ()=>{
+  const d = await post('/play/summary',{transcript:$('su-text').value});
+  if(d.error) return show($('su-res'), badge('b-red','error'), d);
+  let h = (d.degraded?badge('b-amber','DEGRADED'):badge('b-green','generated')) + kv('summary', d.summary);
+  if(d.next_steps?.length) h += kv('next steps', '<br>• '+d.next_steps.join('<br>• '));
+  if(d.when_to_seek_help?.length) h += kv('seek help if', '<br>• '+d.when_to_seek_help.join('<br>• '));
+  show($('su-res'), h, d);
+});}
+
+const PRI = {low:'b-green',normal:'b-blue',high:'b-amber',urgent:'b-red'};
+function runSupport(){ busy(event.target, async ()=>{
+  const d = await post('/play/support',{subject:$('sp-subj').value, message:$('sp-msg').value});
+  if(d.error) return show($('sp-res'), badge('b-red','error'), d);
+  let h = badge('b-violet','category: '+d.category) + badge(PRI[d.priority],'priority: '+d.priority) +
+    (d.distress_flag?badge('b-red','⚠ distress'):'') + (d.degraded?badge('b-amber','degraded'):'');
+  h += '<div class="cards"><div class="card"><div class="t">Draft reply (for agent to review)</div><div class="m">'+
+    (d.draft_reply||'(none — LLM offline)')+'</div></div></div>';
+  if(d.suggested_actions?.length) h += kv('actions','<br>• '+d.suggested_actions.join('<br>• '));
+  show($('sp-res'), h, d);
+});}
+
+function hits(arr){ return '<div class="cards">'+arr.map(r=>
+  '<div class="card"><div class="t">'+(r.title||r.content_id)+(r.score!=null?' <span class="m">('+r.score+')</span>':'')+
+  '</div><div class="m">'+(r.reason||r.type||'')+'</div></div>').join('')+'</div>'; }
+function runSearch(){ busy(event.target, async ()=>{
+  const d = await post('/play/search',{query:$('se-q').value, k:Number($('se-k').value)||5, content_type:$('se-type').value||null});
+  if(d.error) return show($('se-res'), badge('b-red','error'), d);
+  show($('se-res'), badge('b-blue', d.count+' results') + hits(d.results), d);
+});}
+function runRecommend(){ busy(event.target, async ()=>{
+  const d = await post('/play/recommend',{user_interests:list($('re-int').value), user_conditions:list($('re-cond').value),
+    context:$('re-ctx').value, k:Number($('re-k').value)||5, exclude:[]});
+  if(d.error) return show($('re-res'), badge('b-red','error'), d);
+  show($('re-res'), badge('b-violet','strategy: '+d.strategy) + hits(d.recommendations), d);
+});}
+function runIndex(){ busy(event.target, async ()=>{
+  let items; try { items = JSON.parse($('ix-json').value); } catch(e){ return show($('ix-res'), badge('b-red','invalid JSON'), {error:String(e)}); }
+  const d = await post('/play/index',{items});
+  show($('ix-res'), badge('b-green','indexed '+(d.indexed??0)+' · total '+(d.total??'?')), d);
+});}
+</script>
+</body>
+</html>

@@ -1,7 +1,9 @@
 models/
 venv/
-__pycache__/  
+.venv/
+__pycache__/
 *.env
 *.env.*
 *.log
-  
+eval/reports/
+app/rag/data/ingested/

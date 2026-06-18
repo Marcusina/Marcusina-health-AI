@@ -377,6 +377,65 @@ def task_sentiment(
 
 
 # ================================================================ #
+# Misinformation check (RAG: retrieve trusted evidence + LLM judge)  #
+# ================================================================ #
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.social_media_tasks.task_misinfo_check",
+    max_retries=2,
+)
+def task_misinfo_check(
+    self,
+    task_id: str,
+    text: str,
+    entity_id: str | None = None,
+    k: int = 4,
+    callback_url: str | None = None,
+) -> dict:
+    """
+    Grounded misinformation check. Does NOT use the old ONNX misinfo classifier —
+    it retrieves trusted-source evidence and has the local LLM judge the claim
+    against it (app/rag). Advisory only; flagged claims go to human review.
+    """
+    cache_key = make_cache_key("misinfo", text[:120])
+    cached = sync_get_cached(cache_key)
+    if cached:
+        _send_callback(callback_url, task_id, cached)
+        return cached
+
+    t_start = time.perf_counter()
+    try:
+        from app.rag import check_claim
+        result = check_claim(text, k=k)
+        result = {"success": True, "task_id": task_id, "entity_id": entity_id, **result}
+
+        # Don't cache fail-safe "unverified" results — retry once the LLM is back.
+        if result["verdict"] != "unverified":
+            sync_cache_result(cache_key, result, ttl=settings.CACHE_TTL_MODERATION)
+        _send_callback(callback_url, task_id, result)
+
+        persist_task_result(
+            task_id=task_id, task_type="misinfo_check",
+            entity_id=entity_id, entity_type="content",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary={"verdict": result["verdict"], "confidence": result["confidence"]},
+            verdict=result["verdict"],
+        )
+        return result
+
+    except Exception as exc:
+        persist_task_result(
+            task_id=task_id, task_type="misinfo_check",
+            entity_id=entity_id, entity_type="content",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary=None, error=str(exc),
+        )
+        logger.error(f"Misinfo check task {task_id} failed: {exc}")
+        raise self.retry(exc=exc, countdown=3)
+
+
+# ================================================================ #
 # Periodic tasks                                                     #
 # ================================================================ #
 

@@ -271,27 +271,22 @@ def task_soap_note(self, task_id: str, session_id: str, transcript: str,
 
     t_start = time.perf_counter()
     try:
-        # ── NER extraction ────────────────────────────────────────────────
-        ner_session, ner_tokenizer = self.registry.ner
-        t_ner = time.perf_counter()
-        entities = _extract_entities_onnx(ner_session, ner_tokenizer, transcript)
-        ner_ms = (time.perf_counter() - t_ner) * 1000
-        persist_inference_metric(task_id, "ner", ner_ms)
-
-        # ── ICD code suggestions ──────────────────────────────────────────
-        icd_codes = _suggest_icd(entities)
-
-        # ── SOAP sections (rule-based extraction + NER) ───────────────────
-        soap = _rule_based_soap(transcript, entities)
+        # ── LLM SOAP generation (folds entity extraction + grounded ICD) ───
+        from app.clinical import generate_soap
+        t_gen = time.perf_counter()
+        gen = generate_soap(transcript, patient_id=patient_id, specialty=specialty)
+        persist_inference_metric(task_id, "soap_llm", (time.perf_counter() - t_gen) * 1000)
 
         result = {
             "success": True,
             "task_id": task_id,
             "session_id": session_id,
             "patient_id": patient_id,
-            "soap_note": soap,
-            "extracted_entities": entities,
-            "icd_suggestions": icd_codes,
+            "soap_note": gen["soap_note"],
+            "extracted_entities": gen["extracted_entities"],
+            "icd_suggestions": gen["icd_suggestions"],
+            "llm_used": gen["llm_used"],
+            "degraded": gen["degraded"],
         }
 
         sync_cache_result(cache_key, result)
@@ -314,6 +309,53 @@ def task_soap_note(self, task_id: str, session_id: str, transcript: str,
             result_summary=None, error=str(exc),
         )
         logger.error(f"SOAP task {task_id} failed: {exc}")
+        raise self.retry(exc=exc, countdown=3)
+
+
+# ================================================================ #
+# Patient-friendly visit summary                                     #
+# ================================================================ #
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.consultation_tasks.task_summary",
+    max_retries=2,
+    time_limit=60,
+)
+def task_summary(self, task_id: str, session_id: str, transcript: str,
+                 callback_url: str | None = None) -> dict:
+    """Plain-language visit summary for the patient (LLM, app/clinical)."""
+    cache_key = make_cache_key("summary", session_id)
+    cached = sync_get_cached(cache_key)
+    if cached:
+        _send_callback(callback_url, task_id, cached)
+        return cached
+
+    t_start = time.perf_counter()
+    try:
+        from app.clinical import generate_summary
+        gen = generate_summary(transcript, session_id=session_id)
+        result = {"success": True, "task_id": task_id, "session_id": session_id, **gen}
+
+        if not gen["degraded"]:
+            sync_cache_result(cache_key, result)
+        _send_callback(callback_url, task_id, result)
+        persist_task_result(
+            task_id=task_id, task_type="summary",
+            entity_id=session_id, entity_type="session",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary={"degraded": gen["degraded"]},
+        )
+        return result
+
+    except Exception as exc:
+        persist_task_result(
+            task_id=task_id, task_type="summary",
+            entity_id=session_id, entity_type="session",
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary=None, error=str(exc),
+        )
+        logger.error(f"Summary task {task_id} failed: {exc}")
         raise self.retry(exc=exc, countdown=3)
 
 

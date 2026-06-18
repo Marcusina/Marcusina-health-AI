@@ -39,6 +39,7 @@ sentencepiece==0.2.0               # Required by some tokenizers
 faiss-cpu==1.8.0
 sentence-transformers==2.7.0       # Embedding model wrapper
 numpy==1.26.4
+scipy==1.17.1                      # softmax in model_registry (also pulled by sklearn)
 
 # ── Caching & Storage ────────────────────────────────────────────────────────
 redis[hiredis]==5.0.4              # hiredis = C extension for 10x faster parsing
@@ -57,7 +58,9 @@ httpx[asyncio]==0.27.0
 presidio-analyzer==2.2.354
 presidio-anonymizer==2.2.354
 # spaCy model is downloaded separately (see scripts/setup.sh)
-spacy==3.7.4
+# 3.8.x relaxes the typer<0.10 ceiling that 3.7.4 had, which conflicted with
+# fastapi==0.111.0 -> fastapi-cli -> typer>=0.12.3 (made requirements uninstallable).
+spacy>=3.8.2,<3.9.0
 
 # ── Observability ────────────────────────────────────────────────────────────
 loguru==0.7.2

@@ -59,9 +59,12 @@ class Settings(BaseSettings):
 
     # ── faster-whisper ────────────────────────────────────────────────────────
     # Model size: tiny|base|small|medium|large-v3
-    # "base" for dev, "medium" or "large-v3" for production.
+    # "large-v3" is the production target (best WER on medical speech, ~3GB).
+    # NOTE: large-v3 on CPU/int8 is accurate but slow (well below real-time for
+    # long recordings) — production should run it on GPU (WHISPER_DEVICE=cuda,
+    # WHISPER_COMPUTE_TYPE=float16). Use "base"/"small" for fast local dev.
     # compute_type: "int8" (CPU, fastest), "float16" (GPU), "float32" (fallback)
-    WHISPER_MODEL_SIZE: str = "base"
+    WHISPER_MODEL_SIZE: str = "large-v3"
     WHISPER_COMPUTE_TYPE: Literal["int8", "float16", "float32"] = "int8"
     WHISPER_DEVICE: Literal["cpu", "cuda", "auto"] = "cpu"
     # Number of parallel beam search workers inside whisper (tune per server CPU count)
@@ -80,6 +83,25 @@ class Settings(BaseSettings):
     HF_SENTIMENT_MODEL: str = "cardiffnlp/twitter-roberta-base-sentiment-latest"
     HF_EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
+
+    # ── Local LLM server (self-hosted, OpenAI-compatible) ─────────────────────
+    # The generative lane (SOAP notes, summaries, RAG misinfo, support drafts).
+    # Runs on a model server WE host — vLLM (GPU) or Ollama/llama.cpp (CPU/dev).
+    # No external API, no paid key, no data egress. Swapping model or moving from
+    # local CPU to a cloud GPU is a change of these two values only.
+    #
+    #   dev (Ollama):   LLM_BASE_URL=http://localhost:11434/v1   LLM_MODEL=mistral
+    #   dev (llama.cpp):LLM_BASE_URL=http://localhost:8080/v1    LLM_MODEL=mistral-7b-instruct
+    #   prod (vLLM):    LLM_BASE_URL=http://<gpu-host>:8000/v1   LLM_MODEL=...
+    LLM_BASE_URL: str = "http://localhost:11434/v1"
+    LLM_MODEL: str = "mistral"
+    # OpenAI-compatible servers want *some* token; local servers ignore the value.
+    # This is NOT a paid key — it's a placeholder so the HTTP shape is valid.
+    LLM_API_KEY: str = "not-needed"
+    LLM_TIMEOUT_SECONDS: float = 120.0      # generation can be slow on CPU
+    LLM_MAX_TOKENS: int = 1024
+    LLM_TEMPERATURE: float = 0.2            # low — clinical text wants determinism
+    LLM_MAX_RETRIES: int = 2               # transient connection / 5xx retries
 
     # ── ONNX Runtime settings ─────────────────────────────────────────────────
     # Number of threads for ONNX intra-op parallelism per worker process

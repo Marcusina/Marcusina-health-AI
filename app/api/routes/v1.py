@@ -10,7 +10,9 @@ from app.core.security import verify_internal_secret
 from app.core.config import get_settings
 from app.models.schemas import (
     TranscribeRequest, SOAPRequest, TriageRequest,
-    ModerationRequest, RecommendationRequest, SentimentRequest,
+    SummaryRequest,
+    ModerationRequest, RecommendationRequest, SentimentRequest, MisinfoCheckRequest,
+    SupportAssistRequest,
     EnqueueResponse, TaskStatusResponse,
     TaskHistoryItem, InferenceMetricItem, AuditEventItem,
 )
@@ -26,9 +28,12 @@ _TASK = {
     "triage_emergency": "app.tasks.consultation_tasks.task_triage_emergency",
     "triage_normal":    "app.tasks.consultation_tasks.task_triage_normal",
     "soap_note":        "app.tasks.consultation_tasks.task_soap_note",
+    "summary":          "app.tasks.consultation_tasks.task_summary",
     "moderate":         "app.tasks.social_media_tasks.task_moderate",
     "recommend":        "app.tasks.social_media_tasks.task_recommend",
     "sentiment":        "app.tasks.social_media_tasks.task_sentiment",
+    "misinfo_check":    "app.tasks.social_media_tasks.task_misinfo_check",
+    "support_assist":   "app.tasks.support_tasks.task_support_assist",
 }
 
 
@@ -136,6 +141,24 @@ async def soap_note(request: SOAPRequest) -> EnqueueResponse:
     return EnqueueResponse(task_id=task_id, status="queued")
 
 
+@router.post("/consultation/summary", response_model=EnqueueResponse,
+             summary="Generate patient-friendly visit summary from transcript (async)")
+async def summary(request: SummaryRequest) -> EnqueueResponse:
+    cache_key = make_cache_key("summary", request.session_id)
+    cached = await async_get_cached(cache_key)
+    if cached:
+        return EnqueueResponse(task_id="cached", status="complete", result=cached)
+
+    task_id = str(uuid.uuid4())
+    await _enqueue(_TASK["summary"], task_id=task_id, kwargs=dict(
+        task_id=task_id,
+        session_id=request.session_id,
+        transcript=request.transcript,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
+    return EnqueueResponse(task_id=task_id, status="queued")
+
+
 # ================================================================ #
 # Health Social Media                                                #
 # ================================================================ #
@@ -195,6 +218,45 @@ async def sentiment(request: SentimentRequest) -> EnqueueResponse:
         task_id=task_id,
         content_id=request.content_id,
         text=request.text,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
+    return EnqueueResponse(task_id=task_id, status="queued")
+
+
+@router.post("/misinfo/check", response_model=EnqueueResponse,
+             summary="Grounded health-misinformation check (RAG: retrieve + LLM judge, async)")
+async def misinfo_check(request: MisinfoCheckRequest) -> EnqueueResponse:
+    cache_key = make_cache_key("misinfo", request.text[:120])
+    cached = await async_get_cached(cache_key)
+    if cached:
+        return EnqueueResponse(task_id="cached", status="complete", result=cached)
+
+    task_id = str(uuid.uuid4())
+    await _enqueue(_TASK["misinfo_check"], task_id=task_id, kwargs=dict(
+        task_id=task_id,
+        text=request.text,
+        entity_id=request.entity_id,
+        k=request.k,
+        callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
+    ))
+    return EnqueueResponse(task_id=task_id, status="queued")
+
+
+@router.post("/support/assist", response_model=EnqueueResponse,
+             summary="Draft a support reply + routing for a human agent (async)")
+async def support_assist(request: SupportAssistRequest) -> EnqueueResponse:
+    cache_key = make_cache_key("support", request.ticket_id, request.message[:100])
+    cached = await async_get_cached(cache_key)
+    if cached:
+        return EnqueueResponse(task_id="cached", status="complete", result=cached)
+
+    task_id = str(uuid.uuid4())
+    await _enqueue(_TASK["support_assist"], task_id=task_id, kwargs=dict(
+        task_id=task_id,
+        ticket_id=request.ticket_id,
+        subject=request.subject,
+        message=request.message,
+        category_hint=request.category_hint,
         callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
     ))
     return EnqueueResponse(task_id=task_id, status="queued")
