@@ -156,7 +156,7 @@ All return `202 { "task_id": "...", "status": "queued" }`. Pass `callback_url`
 
 | Endpoint | Purpose | Key request fields |
 |----------|---------|--------------------|
-| `POST /api/v1/consultation/transcribe` | audio → transcript (Whisper) | `audio_base64`, `audio_format`, `session_id`, `language?` |
+| `POST /api/v1/consultation/transcribe` | audio → transcript (Whisper); optional stereo speaker-split | `session_id`, **exactly one of** `audio_base64` / `audio_url`, `audio_format`, `language?`, `diarize_stereo?`, `channel_roles?` |
 | `POST /api/v1/consultation/soap-note` ✅ | transcript → SOAP + entities + ICD (local LLM) | `transcript`, `session_id`, `patient_id`, `doctor_id`, `specialty?` |
 | `POST /api/v1/consultation/summary` ✅ | transcript → patient-friendly summary | `transcript`, `session_id` |
 | `POST /api/v1/misinfo/check` ✅ | health claim → verdict + citations (RAG) | `text`, `entity_id`, `k?` |
@@ -193,6 +193,92 @@ never auto-removal):
 
 `unverified` means the LLM was unavailable — the claim was **not** judged; route to
 human review (the retrieved evidence is included as candidate citations).
+
+### The consultation pipeline (audio → transcript → notes)
+
+These three are **separate async jobs** chained by your backend, with the
+**transcript as the shared hub**. One ASR step produces the transcript; the SOAP
+note and the patient summary are two **independent** LLM calls that both take that
+transcript — so you can fire them **in parallel** after transcription.
+
+```
+audio ──/transcribe──▶ transcript ──┬──/soap-note──▶ SOAP note (clinician signs)
+                                     └──/summary────▶ patient summary
+```
+
+**Transcribe callback `result`:**
+
+```jsonc
+{
+  "success": true,
+  "session_id": "sess_123",
+  "transcript": "what brings you in today ... i've had a cough for three days ...",
+  "language_detected": "en",
+  "language_confidence": 0.991,
+  "confidence": 0.94,            // rough ASR confidence (1 − avg no-speech prob)
+  "duration_seconds": 312.5
+}
+```
+
+**Speaker-labeled transcript (stereo split — we handle it):** if you record in
+stereo (practitioner → left channel, patient → right), send
+`diarize_stereo: true` + `channel_roles: ["doctor", "patient"]` (= `[left, right]`).
+We split the channels, transcribe each, and return a labeled, time-ordered
+transcript plus structured segments:
+
+```jsonc
+{
+  "success": true, "session_id": "sess_123",
+  "transcript": "doctor: what brings you in today\npatient: i've had a cough...",
+  "segments": [
+    { "speaker": "doctor",  "start": 0.0, "end": 3.2, "text": "what brings you in today" },
+    { "speaker": "patient", "start": 3.4, "end": 7.1, "text": "i've had a cough..." }
+  ],
+  "speakers": ["doctor", "patient"],
+  "language_detected": "en", "duration_seconds": 312.5, "diarized": true
+}
+```
+
+If the file turns out to be mono, we transparently fall back to the flat
+transcript (`diarized: false`, no `segments`). No diarization model needed — the
+channels carry the speaker identity.
+
+Orchestration: on the transcribe callback, persist the transcript, then enqueue
+`/soap-note` **and** `/summary` with `transcript = result.transcript`. (You don't
+have to run all three — stop after the transcript if that's all you need.)
+
+> **Audio formats:** any common audio/video container decodes — `webm`/opus
+> (browser `MediaRecorder` default), `ogg`, `m4a`/`mp4` (AAC), `wav`, `mp3`,
+> `flac`. The `audio_format` field is a hint; the decoder auto-detects. Image
+> formats (jpg, **avif**, png) are not audio and will fail to decode.
+
+> **Speaker labels (Doctor vs Patient):** Whisper transcribes words, not who
+> spoke them. The clean way to get labels — **without any diarization model** — is
+> to **record in stereo** (practitioner on the left channel, patient on the right)
+> and send `diarize_stereo: true`. **We do the channel split and per-channel
+> transcription server-side** and return the labeled transcript above. The client
+> still records *one* file from *one* device (see §8); it just keeps the two
+> voices on separate channels. A single *mixed* track can't be labeled this way —
+> that would need a diarization model (`pyannote`, GPU) — so use stereo.
+
+### Entitlement — who gets SOAP / summary (your decision, not ours)
+
+**The AI service knows nothing about subscriptions or billing** — it just does the
+work when you call it. **Whether** to call an endpoint for a given user, and **who
+receives** the output, is enforced by your backend (which has the subscription
+data). That keeps billing logic where it belongs and keeps the AI service simple.
+
+Concretely, for your tiers:
+
+| Output | Who | How you gate it |
+|--------|-----|------------------|
+| Transcript + **SOAP note** (professional's record) | **Professionals — automatic** | Always call `/transcribe` + `/soap-note` after a consultation |
+| **Patient-facing summary** | **Paid subscribers only** | Only call `/summary` (or only deliver its result to the patient) when the patient's tier allows it |
+
+Cheapest approach: **don't call `/summary` at all** for non-entitled patients — you
+save the compute. Or call it and gate delivery; your choice. Either way it's a
+one-line `if (patient.tier === "paid")` in your orchestration — no change on our
+side.
 
 **SOAP callback `result`** (a draft for the **clinician to review and sign** — never
 final): `{ soap_note: {subjective, objective, assessment, plan}, extracted_entities:
@@ -391,11 +477,29 @@ client records → uploads → backend stores in object storage
   → clinician reviews & signs the SOAP draft (it is a draft, never final)
 ```
 
-### Capture scope
-- A **single mixed mono track** is enough for Whisper/SOAP. Mix local mic + remote
-  track with the Web Audio API into one `MediaRecorder`.
-- Want **"Doctor:" / "Patient:" labels**? Record the two tracks separately (or add
-  diarization later) — but don't block Phase 1 on it.
+### Capture scope — ONE device records, ONE upload, both voices
+
+**Only one participant records, and only one upload happens** — exactly like a
+phone call-recording app: your phone captures *both* voices (yours + the person
+you're talking to) from one device; you don't ask the other person to record
+their half too.
+
+Why one device is enough: during the call that device has **two** audio sources —
+its **microphone** (this person's voice) **and the other person's voice arriving
+over the network** (what lets you hear them). The app records **both together** =
+the whole conversation. The microphone alone is only half; the incoming audio is
+the other half, and the app grabs it too (via the WebRTC remote track + Web Audio).
+
+- **Pick one recorder** — typically the **practitioner's client** (more stable).
+  The other party uploads **nothing**. No duplicate submissions, no missing half.
+- **Simplest:** record a **single mixed mono track** (local mic + remote mixed into
+  one `MediaRecorder`). Enough for Whisper/SOAP. **No speaker labels.**
+- **Want auto "Doctor:/Patient:" labels?** Still one device, one upload — record
+  **stereo**: practitioner → **left** channel, patient → **right** channel, then
+  call `/transcribe` with `diarize_stereo: true` + `channel_roles: ["doctor",
+  "patient"]`. **We split the channels and transcribe each server-side** → a
+  labeled transcript, no diarization model. (A single *mixed* track can't be
+  labeled this way; only stereo carries the per-speaker identity.)
 - **Mobile** uses native recording; **web** uses `MediaRecorder` (webm/opus is fine).
 
 ### Safety / PHI rules (bake these in)
@@ -409,11 +513,18 @@ client records → uploads → backend stores in object storage
 Consent UX · object storage choice · retention period · chunked-vs-whole-file ·
 mobile native recording.
 
-### One enhancement on the AI side
-`/transcribe` currently accepts `audio_base64` (fine for short clips). For long
-consultations we'll add **`audio_url`** support so the AI service fetches the file
-from your storage instead of inflating it through the request body — quick change
-when you're ready.
+### Audio sourcing (implemented ✅)
+`/transcribe` accepts **exactly one** of:
+- `audio_base64` — fine for short clips.
+- `audio_url` — a **fetchable URL** (e.g. a presigned object-storage link). The AI
+  service downloads it, so long consultations aren't base64-inflated through the
+  request body. **Preferred for real recordings.**
+
+Guards: the URL must be `http`/`https`; downloads are streamed with a size cap
+(`AUDIO_MAX_MB`, default 100); and an optional host allowlist
+(`AUDIO_FETCH_ALLOWED_HOSTS`, e.g. `["storage.marcusina.dev"]`) prevents SSRF — set
+it to your storage host in production. Use **presigned/expiring URLs** so the
+service can fetch without credentials.
 
 ### Phase 2 (only if needed later)
 If you later want **live real-time transcription** or **recordings as a product

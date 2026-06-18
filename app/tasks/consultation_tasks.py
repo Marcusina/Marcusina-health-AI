@@ -32,6 +32,124 @@ _callback_client = httpx.Client(
 )
 
 
+# ── Audio acquisition (base64 or fetched URL) ─────────────────────────────────
+
+def _validate_audio_url(url: str) -> None:
+    """Guard against SSRF: http(s) only, and host allowlist if configured."""
+    from urllib.parse import urlparse
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise ValueError("audio_url must be http or https")
+    allowed = settings.AUDIO_FETCH_ALLOWED_HOSTS
+    if allowed and p.hostname not in allowed:
+        raise ValueError(f"audio_url host '{p.hostname}' is not in AUDIO_FETCH_ALLOWED_HOSTS")
+
+
+def _download_audio(url: str, dest_path: str) -> None:
+    """Stream a URL to disk with a hard size cap (avoids loading huge files in RAM)."""
+    _validate_audio_url(url)
+    max_bytes = settings.AUDIO_MAX_MB * 1024 * 1024
+    total = 0
+    with httpx.stream("GET", url, timeout=settings.AUDIO_FETCH_TIMEOUT,
+                      follow_redirects=True) as r:
+        r.raise_for_status()
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(f"audio exceeds AUDIO_MAX_MB ({settings.AUDIO_MAX_MB}MB)")
+                f.write(chunk)
+    if total == 0:
+        raise ValueError("fetched audio_url is empty")
+
+
+def _acquire_audio(audio_base64: str | None, audio_url: str | None,
+                   audio_format: str) -> str:
+    """Write audio (from base64 or a fetched URL) to a temp file; return its path."""
+    tmp = tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        if audio_url:
+            _download_audio(audio_url, tmp_path)
+        else:
+            with open(tmp_path, "wb") as f:
+                f.write(base64.b64decode(audio_base64 or ""))
+        return tmp_path
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
+def _confidence(segments) -> float:
+    """Rough ASR confidence: 1 − average no-speech probability."""
+    if not segments:
+        return 0.0
+    return 1.0 - (sum(getattr(s, "no_speech_prob", 0) for s in segments) / len(segments))
+
+
+def _run_whisper(whisper, audio, language):
+    gen, info = whisper.transcribe(
+        audio, language=language, beam_size=settings.WHISPER_BEAM_SIZE,
+        vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
+        word_timestamps=False,
+    )
+    return list(gen), info
+
+
+def _transcribe(whisper, tmp_path: str, language: str | None,
+                diarize_stereo: bool, channel_roles: list[str] | None):
+    """
+    Transcribe a consultation. With diarize_stereo, split the stereo channels and
+    transcribe each separately to get speaker-labeled output (left = role[0],
+    right = role[1]). If the file is actually mono, fall back to a flat transcript.
+    Returns (result_fields, whisper_ms).
+    """
+    t0 = time.perf_counter()
+
+    if diarize_stereo:
+        import numpy as np
+        from faster_whisper.audio import decode_audio
+        left, right = decode_audio(tmp_path, sampling_rate=16000, split_stereo=True)
+        if not np.allclose(left, right):                       # genuinely stereo
+            roles = (channel_roles or ["speaker_1", "speaker_2"])[:2]
+            segs_out, all_segs = [], []
+            lang, lang_p = None, 0.0
+            for audio, role in ((left, roles[0]), (right, roles[1])):
+                segs, info = _run_whisper(whisper, audio, language)
+                all_segs.extend(segs)
+                if lang is None:
+                    lang, lang_p = info.language, info.language_probability
+                for s in segs:
+                    text = s.text.strip()
+                    if text:
+                        segs_out.append({"speaker": role, "start": round(s.start, 2),
+                                         "end": round(s.end, 2), "text": text})
+            segs_out.sort(key=lambda x: x["start"])
+            fields = {
+                "transcript": "\n".join(f"{s['speaker']}: {s['text']}" for s in segs_out),
+                "segments": segs_out, "speakers": roles,
+                "language_detected": lang, "language_confidence": round(lang_p, 3),
+                "confidence": round(_confidence(all_segs), 3),
+                "duration_seconds": round(max((s["end"] for s in segs_out), default=0.0), 2),
+                "diarized": True,
+            }
+            return fields, (time.perf_counter() - t0) * 1000
+        logger.info("diarize_stereo requested but audio is mono — flat transcript.")
+
+    segments, info = _run_whisper(whisper, tmp_path, language)
+    fields = {
+        "transcript": " ".join(s.text.strip() for s in segments),
+        "language_detected": info.language,
+        "language_confidence": round(info.language_probability, 3),
+        "confidence": round(_confidence(segments), 3),
+        "duration_seconds": round(segments[-1].end if segments else 0.0, 2),
+        "diarized": False,
+    }
+    return fields, (time.perf_counter() - t0) * 1000
+
+
 class ModelTask(Task):
     """Base task class that ensures models are loaded before first task runs."""
     abstract = True
@@ -63,10 +181,13 @@ def task_transcribe(
     self,
     task_id: str,
     session_id: str,
-    audio_base64: str,
-    audio_format: str,
-    language: str | None,
-    speaker: str,
+    audio_base64: str | None = None,
+    audio_format: str = "wav",
+    language: str | None = None,
+    speaker: str = "patient",
+    audio_url: str | None = None,
+    diarize_stereo: bool = False,
+    channel_roles: list[str] | None = None,
     callback_url: str | None = None,
 ):
     """
@@ -82,54 +203,30 @@ def task_transcribe(
 
     t_start = time.perf_counter()
     try:
-        audio_bytes = base64.b64decode(audio_base64)
-
-        suffix = f".{audio_format}"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
+        tmp_path = _acquire_audio(audio_base64, audio_url, audio_format)
 
         try:
-            t_whisper = time.perf_counter()
-            segments_gen, info = self.registry.whisper.transcribe(
-                tmp_path,
-                language=language,
-                beam_size=settings.WHISPER_BEAM_SIZE,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
-                word_timestamps=False,
-            )
-            segments = list(segments_gen)
-            whisper_ms = (time.perf_counter() - t_whisper) * 1000
+            fields, whisper_ms = _transcribe(self.registry.whisper, tmp_path, language,
+                                             diarize_stereo, channel_roles)
         finally:
             os.unlink(tmp_path)
 
-        transcript = " ".join(s.text.strip() for s in segments)
-        duration = segments[-1].end if segments else 0.0
-        confidence = 1.0 - (sum(getattr(s, "no_speech_prob", 0) for s in segments) / max(len(segments), 1))
-
-        result = {
-            "success": True,
-            "task_id": task_id,
-            "session_id": session_id,
-            "transcript": transcript,
-            "language_detected": info.language,
-            "language_confidence": round(info.language_probability, 3),
-            "confidence": round(confidence, 3),
-            "duration_seconds": round(duration, 2),
-        }
+        result = {"success": True, "task_id": task_id, "session_id": session_id, **fields}
 
         sync_cache_result(cache_key, result, ttl=settings.CACHE_TTL_SECONDS)
-        log_transcription(session_id, duration, info.language, request_id=task_id)
+        log_transcription(session_id, fields["duration_seconds"], fields["language_detected"],
+                          request_id=task_id)
         _send_callback(callback_url, task_id, result)
 
-        total_ms = int((time.perf_counter() - t_start) * 1000)
-        persist_inference_metric(task_id, "whisper", whisper_ms, info.language, round(confidence, 3))
+        persist_inference_metric(task_id, "whisper", whisper_ms,
+                                 fields["language_detected"], fields["confidence"])
         persist_task_result(
             task_id=task_id, task_type="transcribe",
             entity_id=session_id, entity_type="session",
-            duration_ms=total_ms,
-            result_summary={"language": info.language, "duration_seconds": round(duration, 2), "confidence": round(confidence, 3)},
+            duration_ms=int((time.perf_counter() - t_start) * 1000),
+            result_summary={"language": fields["language_detected"],
+                            "duration_seconds": fields["duration_seconds"],
+                            "confidence": fields["confidence"], "diarized": fields["diarized"]},
         )
         return result
 

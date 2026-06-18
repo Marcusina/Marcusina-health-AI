@@ -85,9 +85,12 @@ async def transcribe(request: TranscribeRequest) -> EnqueueResponse:
         task_id=task_id,
         session_id=request.session_id,
         audio_base64=request.audio_base64,
+        audio_url=request.audio_url,
         audio_format=request.audio_format,
         language=request.language,
         speaker=request.speaker,
+        diarize_stereo=request.diarize_stereo,
+        channel_roles=request.channel_roles,
         callback_url=request.callback_url or settings.FASTIFY_CALLBACK_URL,
     ))
     logger.info(f"Enqueued transcription task {task_id} for session {request.session_id}")

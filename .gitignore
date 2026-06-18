@@ -1,4 +1,6 @@
-models/
+# ML model artifacts live in ./models at the repo root. Anchor with a leading
+# slash so this does NOT also ignore app/models/ (the Pydantic schemas package).
+/models/
 venv/
 .venv/
 __pycache__/

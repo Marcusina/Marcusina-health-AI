@@ -16,14 +16,29 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from httpx import AsyncClient, ASGITransport
 
-# Mock heavy deps before app import
+# Mock heavy deps before app import (kept light so these route tests don't load
+# the real ML stack). Restored on teardown so later test files get the real
+# modules — see _restore_heavy_modules below.
 import sys
-for mod in ["faster_whisper", "onnxruntime", "faiss", "sentence_transformers",
-            "transformers", "presidio_analyzer", "presidio_anonymizer", "spacy"]:
+_HEAVY = ["faster_whisper", "onnxruntime", "faiss", "sentence_transformers",
+          "transformers", "presidio_analyzer", "presidio_anonymizer", "spacy"]
+_HEAVY_ORIG = {m: sys.modules.get(m) for m in _HEAVY}
+for mod in _HEAVY:
     sys.modules[mod] = MagicMock()
 
 from app.main import app
 from app.core.config import get_settings
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_heavy_modules():
+    """Undo the global sys.modules mocking after this file's tests."""
+    yield
+    for m in _HEAVY:
+        if _HEAVY_ORIG[m] is not None:
+            sys.modules[m] = _HEAVY_ORIG[m]
+        else:
+            sys.modules.pop(m, None)   # drop the mock so later tests import the real module
 
 settings = get_settings()
 HEADERS = {"X-AI-Secret": settings.API_SECRET_KEY, "Content-Type": "application/json"}

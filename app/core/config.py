@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     # Batch audio segments for faster transcription of long recordings
     WHISPER_BATCH_SIZE: int = 16
 
+    # ── Audio fetch (for /transcribe with audio_url) ──────────────────────────
+    # When the backend sends an audio_url (e.g. a presigned object-storage URL)
+    # instead of base64, the worker fetches it. Guards against SSRF + huge files.
+    AUDIO_FETCH_TIMEOUT: float = 60.0
+    AUDIO_MAX_MB: int = 100
+    # If non-empty, audio_url's host must be in this allowlist (set per deployment,
+    # e.g. ["storage.marcusina.dev"]). Empty = allow any host (trusted caller only).
+    AUDIO_FETCH_ALLOWED_HOSTS: list[str] = []
+
     # ── ONNX NLP Models ───────────────────────────────────────────────────────
     # HuggingFace model IDs — converted to ONNX at setup time via scripts/export_onnx.py
     # After export, inference uses ONNX Runtime (no PyTorch at runtime).
