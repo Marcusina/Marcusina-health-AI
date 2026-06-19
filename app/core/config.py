@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:4000"]
     FASTIFY_CALLBACK_URL: str = "http://localhost:3000/internal/ai-callback"
 
+    # ── Rate limiting (Redis-backed → one global limit across all workers) ────
+    # Fixed-window backpressure so a flood/buggy caller can't exhaust the service.
+    # Limit is per identity: X-Client-Id header if the caller sends one (lets the
+    # backend rate-limit per end user), else the client IP. Fails OPEN if Redis is
+    # down — availability matters more than strict limiting for a safety service.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_REQUESTS: int = 600          # max requests per identity per window
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+    # Only trust X-Forwarded-For when behind a proxy you control (else it's spoofable).
+    RATE_LIMIT_TRUST_FORWARDED_FOR: bool = False
+
     # ── Redis cluster (cache + Celery result backend) ─────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_RESULT_URL: str = "redis://localhost:6379/1"   # Celery results

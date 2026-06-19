@@ -79,8 +79,18 @@ app.add_middleware(
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["POST", "GET"],
-    allow_headers=["X-AI-Secret", "Content-Type"],
+    allow_headers=["X-AI-Secret", "Content-Type", "X-Client-Id"],
 )
+
+# Redis-backed global rate limiting (backpressure). Skips /health, /metrics, docs.
+if settings.RATE_LIMIT_ENABLED:
+    from app.core.rate_limit import RateLimitMiddleware
+    app.add_middleware(
+        RateLimitMiddleware,
+        limit=settings.RATE_LIMIT_REQUESTS,
+        window=settings.RATE_LIMIT_WINDOW_SECONDS,
+        trust_forwarded=settings.RATE_LIMIT_TRUST_FORWARDED_FOR,
+    )
 
 # Prometheus metrics — exclude /health to avoid counter spam at 5k RPS
 Instrumentator(

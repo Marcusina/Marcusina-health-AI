@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import time
 from typing import Optional, Any
 from loguru import logger
 
@@ -10,16 +11,27 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+# Connect/read timeouts so a down or filtered Redis fails fast instead of hanging
+# the request. After a failure we back off for this long before retrying — the
+# rate limiter and cache run on every request, so reconnecting each time during a
+# Redis outage would stall the whole service.
+_REDIS_CONNECT_TIMEOUT = 0.5
+_REDIS_SOCKET_TIMEOUT = 1.0
+_REDIS_DOWN_BACKOFF = 10.0
+
 # ── Async client (FastAPI) ────────────────────────────────────────────────────
 _async_redis = None
 _async_redis_lock = asyncio.Lock()
+_async_redis_down_until = 0.0       # skip reconnect attempts until this monotonic time
 
 async def _get_async_redis():
-    global _async_redis
+    global _async_redis, _async_redis_down_until
     if _async_redis is not None:
         return _async_redis
+    if time.monotonic() < _async_redis_down_until:
+        return None                 # recently failed — fail fast, don't reconnect every call
     async with _async_redis_lock:
-        if _async_redis is None:
+        if _async_redis is None and time.monotonic() >= _async_redis_down_until:
             try:
                 import redis.asyncio as aioredis
                 client = aioredis.from_url(
@@ -27,11 +39,14 @@ async def _get_async_redis():
                     encoding="utf-8",
                     decode_responses=True,
                     max_connections=200,
+                    socket_connect_timeout=_REDIS_CONNECT_TIMEOUT,
+                    socket_timeout=_REDIS_SOCKET_TIMEOUT,
                 )
                 await client.ping()
                 _async_redis = client
             except Exception as e:
-                logger.warning(f"Async Redis unavailable: {e}")
+                logger.warning(f"Async Redis unavailable (backing off {_REDIS_DOWN_BACKOFF}s): {e}")
+                _async_redis_down_until = time.monotonic() + _REDIS_DOWN_BACKOFF
     return _async_redis
 
 
@@ -72,6 +87,8 @@ def _get_sync_redis():
                 encoding="utf-8",
                 decode_responses=True,
                 max_connections=50,
+                socket_connect_timeout=_REDIS_CONNECT_TIMEOUT,
+                socket_timeout=_REDIS_SOCKET_TIMEOUT,
             )
             _sync_redis.ping()
         except Exception as e:

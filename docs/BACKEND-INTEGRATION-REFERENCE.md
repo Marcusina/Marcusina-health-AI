@@ -26,6 +26,13 @@ database model — you call us, we return a result, **you** persist it to MongoD
   `X-Callback-Secret: <FASTIFY_CALLBACK_SECRET>`. Your callback route must verify it.
 - **Identity:** forward the gateway's `x-user-id` / `x-user-role` so we can audit
   who triggered an inference. We never use them for authorization — that's yours.
+- **Rate limiting:** the AI service enforces a Redis-backed global limit
+  (`RATE_LIMIT_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`, default 600/60s) per
+  identity. Identity = the `X-Client-Id` header if you send one (so you can budget
+  per end user), else the caller IP. Over-limit returns **`429`** with a
+  `Retry-After` (seconds) header; responses also carry `X-RateLimit-Limit` /
+  `X-RateLimit-Remaining`. Handle `429` with backoff. `/health` and `/metrics`
+  are exempt. (Tune the limit per deployment; it fails open if Redis is down.)
 
 ```
 # .env additions (Core API)
