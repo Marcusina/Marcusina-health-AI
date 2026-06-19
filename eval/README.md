@@ -119,6 +119,33 @@ PubMed/WHO/CDC snapshots), not the model. `verdict_spread` in each report shows
 coverage: PUBHEALTH was `{unsupported: 40}`, curated was `{contradicted: 12,
 supported: 9, unsupported: 3}`.
 
+### Pulling the lever — corpus expansion (2026-06-19)
+
+Acted on the finding above: grew the trusted corpus from the 35-doc seed to
+**212 docs** by ingesting **175 real PubMed abstracts** (with PMIDs + URLs) across
+the common consumer-health-misinfo domains. Reproducible, not ad-hoc — a committed
+recipe (`app/rag/data/ingest_queries.jsonl`, 30 trusted queries) run via:
+
+```
+python -m app.rag.ingest batch          # re-runnable; content-hash dedup makes it idempotent
+```
+
+No medical "facts" were hand-written (provenance/safety): every new doc is a real
+abstract the judge cites by URL. Measured impact (granite4.1:8b judge):
+
+| Check | Before (seed only) | After (212-doc corpus) |
+|-------|--------------------|------------------------|
+| Curated sample false positives (true info wrongly flagged) | 0 / 12 | **0 / 12** (no regression) |
+| Curated sample misinfo recall | 12 / 12 | **12 / 12** |
+| Out-of-seed probe claims (ivermectin, cinnamon, HIV-casual-contact, statins, HPV…) | mostly `unsupported` (coverage gap) | **7 / 8 correct**, verdicts now citing the new PubMed evidence |
+
+The single probe miss (laetrile → `unsupported`, not `contradicted`) is the *safe*
+failure: it abstains and routes to human review rather than mislabeling. Confirms
+the thesis — **recall is gated by coverage, and coverage is grown by ingestion, not
+by changing the model.** Ingested docs live under `app/rag/data/ingested/`
+(gitignored); the recipe is the committed, shippable artifact — run `batch` at
+deploy to populate, or promote a vetted snapshot into the seed.
+
 ## Baseline result — sentiment model (2026-06-18)
 
 **Model:** `cardiffnlp/twitter-roberta-base-sentiment-latest`. **Benchmark:**

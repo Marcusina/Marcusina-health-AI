@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 
 import app.rag.corpus as corpus
-from app.rag.ingest import chunk_text, make_doc, ingest_files, add_documents
+import app.rag.ingest as ingest_mod
+from app.rag.ingest import chunk_text, make_doc, ingest_files, add_documents, ingest_batch
 
 
 # ── chunking ──────────────────────────────────────────────────────────────────
@@ -87,6 +88,39 @@ def test_add_documents_dedup(tmp_path, monkeypatch):
     assert len(written) == 1
     lines = written[0].read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
+
+
+# ── batch recipe ──────────────────────────────────────────────────────────────
+
+def test_ingest_batch_runs_jobs_and_survives_failures(tmp_path, monkeypatch):
+    # No network: stub the two source loaders. One pubmed job raises — the batch
+    # must log-and-skip it, not abort, and still ingest the rest.
+    monkeypatch.setattr(ingest_mod, "INGESTED_DIR", tmp_path)
+    monkeypatch.setattr(ingest_mod, "load_corpus", lambda: [])
+    monkeypatch.setattr(ingest_mod.time, "sleep", lambda *_: None)  # don't wait in tests
+
+    def fake_pubmed(query, *, max_results, topic):
+        if "boom" in query:
+            raise RuntimeError("network blew up")
+        return [make_doc(f"evidence about {query}", source="PubMed", topic=topic)]
+
+    def fake_files(path, *, source, topic):
+        return [make_doc(f"file evidence from {path}", source=source, topic=topic)]
+
+    monkeypatch.setattr(ingest_mod, "ingest_pubmed", fake_pubmed)
+    monkeypatch.setattr(ingest_mod, "ingest_files", fake_files)
+
+    recipe = tmp_path / "recipe.jsonl"
+    recipe.write_text("\n".join(json.dumps(j) for j in [
+        {"source": "pubmed", "query": "good query", "topic": "vaccines", "max": 3},
+        {"source": "pubmed", "query": "boom query", "topic": "covid-19"},   # fails, skipped
+        {"source": "files", "path": "docs/who", "name": "WHO", "topic": "covid-19"},
+        {"source": "mystery", "query": "ignored"},                          # unknown, skipped
+    ]) + "\n", encoding="utf-8")
+
+    res = ingest_batch(recipe, refresh=False)
+    assert res["added"] == 2                       # one pubmed + one files survived
+    assert res["received"] == 2
 
 
 # ── seed + ingested merge ─────────────────────────────────────────────────────

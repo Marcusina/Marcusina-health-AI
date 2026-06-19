@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -143,6 +144,48 @@ def ingest_pubmed(query: str, *, max_results: int = 20, topic: str | None = None
     return docs
 
 
+# ── batch recipe (reproducible corpus growth) ─────────────────────────────────
+
+def ingest_batch(recipe_path: str | Path, *, refresh: bool = True,
+                 pause_seconds: float = 0.4) -> dict:
+    """
+    Run a checked-in recipe of ingestion jobs so the corpus can be regrown
+    deterministically (re-runs are safe — add_documents dedups by content hash).
+
+    Recipe = a .jsonl, one job per line:
+        {"source": "pubmed", "query": "...", "topic": "vaccines", "max": 8}
+        {"source": "files",  "path": "docs/who/", "name": "WHO", "topic": "covid-19"}
+
+    PubMed jobs are spaced by `pause_seconds` to stay under NCBI's keyless
+    rate limit (3 req/s). A failing job is logged and skipped, not fatal —
+    one bad query shouldn't sink the whole batch.
+    """
+    recipe_path = Path(recipe_path)
+    jobs = [json.loads(l) for l in
+            recipe_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+    all_docs: list[dict] = []
+    for i, job in enumerate(jobs):
+        src = job.get("source", "pubmed")
+        topic = job.get("topic")
+        try:
+            if src == "pubmed":
+                if i:
+                    time.sleep(pause_seconds)
+                all_docs += ingest_pubmed(job["query"], max_results=job.get("max", 20),
+                                          topic=topic)
+            elif src == "files":
+                all_docs += ingest_files(job["path"], source=job.get("name", "local"),
+                                         topic=topic or "general")
+            else:
+                logger.warning(f"[ingest] batch: unknown source {src!r}, skipping")
+        except Exception as e:   # one bad job shouldn't sink the batch
+            logger.warning(f"[ingest] batch job {job!r} failed: {e}")
+
+    logger.info(f"[ingest] batch: {len(jobs)} job(s) -> {len(all_docs)} docs collected")
+    return add_documents(all_docs, refresh=refresh)
+
+
 # ── persist (with dedup) ──────────────────────────────────────────────────────
 
 def add_documents(docs: list[dict], *, refresh: bool = True) -> dict:
@@ -197,6 +240,10 @@ def _main(argv: list[str] | None = None) -> int:
     pp.add_argument("--max", type=int, default=20)
     pp.add_argument("--topic", default=None)
 
+    pb = sub.add_parser("batch", help="run a .jsonl recipe of ingestion jobs")
+    pb.add_argument("recipe", nargs="?",
+                    default=str(Path(__file__).parent / "data" / "ingest_queries.jsonl"))
+
     sub.add_parser("stats", help="show current corpus size")
     args = ap.parse_args(argv)
 
@@ -208,6 +255,10 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"corpus total: {len(corpus)}")
         for s, n in sorted(by_source.items(), key=lambda x: -x[1]):
             print(f"  {s}: {n}")
+        return 0
+
+    if args.cmd == "batch":
+        print(ingest_batch(args.recipe))
         return 0
 
     if args.cmd == "files":
