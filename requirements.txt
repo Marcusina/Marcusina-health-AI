@@ -6,12 +6,12 @@
 # =============================================================================
 
 # ── Core API ──────────────────────────────────────────────────────────────────
-fastapi==0.111.0
+fastapi==0.115.12                  # security: pulls starlette>=0.40 (CVE-2024-47874 etc.)
 uvicorn[standard]==0.29.0          # Includes uvloop (Linux only, faster event loop)
 gunicorn==22.0.0                   # Production WSGI/ASGI process manager
 pydantic==2.7.1
 pydantic-settings==2.2.1
-python-multipart==0.0.9            # File upload support
+python-multipart==0.0.32           # security: CVE-2024-53981 + later multipart DoS fixes
 
 # ── Async task queue ──────────────────────────────────────────────────────────
 celery[rabbitmq]==5.4.0            # Async task dispatch
@@ -32,7 +32,7 @@ onnxruntime==1.18.0                # CPU inference (use onnxruntime-gpu on GPU s
 optimum[onnxruntime]==1.20.0       # HuggingFace → ONNX export tool
 transformers==4.40.1               # Model loading & tokenizers only (not for inference)
 tokenizers==0.19.1                 # Fast Rust tokenizer (no build issues)
-sentencepiece==0.2.0               # Required by some tokenizers
+sentencepiece==0.2.1               # Required by some tokenizers (0.2.1 = security fix)
 
 # ── Vector Search (Recommendations) ──────────────────────────────────────────
 # faiss-cpu: pre-built wheels for Linux & Windows. No build needed.
@@ -55,6 +55,9 @@ psycopg2-binary==2.9.9             # Sync PostgreSQL driver (Celery workers)
 httpx[asyncio]==0.27.0
 
 # ── Security & Compliance ────────────────────────────────────────────────────
+# Pin setuptools to a patched build tool: clears CVE-2024-6345 (RCE) and
+# CVE-2025-47273 (path traversal); capped <82 by torch's requirement.
+setuptools>=78.1.1,<82
 # presidio: PII detection/redaction — pure Python, no build issues
 presidio-analyzer==2.2.354
 presidio-anonymizer==2.2.354
