@@ -64,7 +64,7 @@
 <body>
 <header>
   <div>
-    <h1>🏥 Marcusina AI — Local Playground</h1>
+    <h1> Marcusina AI — Local Playground</h1>
     <div class="sub">in-process · no DB/queue needed · localhost only</div>
   </div>
   <div id="llm" onclick="checkLLM()"><span class="dot" id="llmdot"></span><span id="llmtxt">checking LLM…</span></div>
@@ -79,6 +79,11 @@
     <button data-tab="soap">SOAP note</button>
     <button data-tab="summary">Visit summary</button>
     <button data-tab="support">Support assist</button>
+    <div class="group">Tier 3 · clinical</div>
+    <button data-tab="meds">Drug interactions</button>
+    <button data-tab="intake">Symptom intake</button>
+    <div class="group">Voice / audio</div>
+    <button data-tab="transcribe">Transcribe</button>
     <div class="group">Search · recommend</div>
     <button data-tab="search">Semantic search</button>
     <button data-tab="recommend">Recommendations</button>
@@ -162,6 +167,56 @@ Doctor: Your temperature is 37.9. Chest sounds clear. Likely a viral infection. 
       <div class="result" id="sp-res"></div>
     </section>
 
+    <!-- MEDS -->
+    <section class="tab" id="tab-meds">
+      <h2>Drug-interaction check</h2>
+      <p class="desc">Curated rule base is authoritative (brand names + dosage text tolerated); the optional LLM pass only adds candidates. It never says “safe” — absence of a flag means “not in our reference set”. Always clinician-confirmed.</p>
+      <label>Medications (one per line, or comma-separated)</label>
+      <textarea id="md-list">Coumadin 5mg
+Advil
+Viagra
+isosorbide mononitrate</textarea>
+      <div class="opts"><label><input type="checkbox" id="md-llm"> add LLM advisory candidates (needs LLM)</label></div>
+      <button class="run" onclick="runMeds()">Check interactions</button>
+      <div class="result" id="md-res"></div>
+    </section>
+
+    <!-- INTAKE -->
+    <section class="tab" id="tab-intake">
+      <h2>Pre-consultation symptom intake</h2>
+      <p class="desc">Red-flag triage net is authoritative for urgency (LLM can’t downgrade an emergency); the LLM only structures the complaint + asks clarifying questions. Advisory, never a diagnosis. Degrades to a rules skeleton with the LLM off.</p>
+      <label>Symptoms</label>
+      <textarea id="in-sym">sore throat and a mild fever for 3 days, a bit of a cough</textarea>
+      <div class="row">
+        <div><label>Age</label><input type="number" id="in-age" value="28"></div>
+        <div><label>Sex</label><input type="text" id="in-sex" value="F"></div>
+        <div><label>Duration</label><input type="text" id="in-dur" value="3 days"></div>
+      </div>
+      <div class="row">
+        <div><label>Existing conditions (comma-separated)</label><input type="text" id="in-cond" value=""></div>
+        <div><label>Current medications (comma-separated)</label><input type="text" id="in-meds" value=""></div>
+      </div>
+      <div class="opts"><label><input type="checkbox" id="in-llm" checked> use LLM to structure intake</label></div>
+      <button class="run" onclick="runIntake()">Build intake</button>
+      <div class="result" id="in-res"></div>
+    </section>
+
+    <!-- TRANSCRIBE -->
+    <section class="tab" id="tab-transcribe">
+      <h2>Voice transcription (Whisper)</h2>
+      <p class="desc">Upload a consultation clip → transcript. This runs the same code as the <code>/transcribe</code> task, in-process. <b>First run loads the Whisper model</b> (a moment). With <i>stereo speaker-split</i> on, a 2-channel recording is labelled by speaker.</p>
+      <div class="hint">No LLM needed — Whisper is self-hosted. <code>base</code> on CPU is slow on long audio; use a short clip to try it.</div>
+      <label>Audio file (wav / mp3 / m4a / …)</label>
+      <input type="file" id="ts-file" accept="audio/*">
+      <div class="row">
+        <div><label>Language (optional, e.g. en)</label><input type="text" id="ts-lang" placeholder="auto-detect"></div>
+        <div><label>Channel roles (stereo only, comma-separated)</label><input type="text" id="ts-roles" value="doctor, patient"></div>
+      </div>
+      <div class="opts"><label><input type="checkbox" id="ts-stereo"> stereo speaker-split (diarize)</label></div>
+      <button class="run" onclick="runTranscribe()">Transcribe</button>
+      <div class="result" id="ts-res"></div>
+    </section>
+
     <!-- SEARCH -->
     <section class="tab" id="tab-search">
       <h2>Semantic search</h2>
@@ -184,6 +239,8 @@ Doctor: Your temperature is 37.9. Chest sounds clear. Likely a viral infection. 
         <div><label>Interests (comma-separated)</label><input type="text" id="re-int" value="diabetes, nutrition"></div>
         <div><label>Conditions (comma-separated)</label><input type="text" id="re-cond" value="hypertension"></div>
       </div>
+      <label>Recently viewed content ids (cold-start — comma-separated; leave interests blank to test)</label>
+      <input type="text" id="re-seed" placeholder="e.g. my-1, my-2">
       <div class="row">
         <div><label>Context</label>
           <select id="re-ctx"><option value="">(none)</option><option>after_consultation</option></select></div>
@@ -256,13 +313,15 @@ function runTriage(){ busy(event.target, async ()=>{
   show($('tr-res'), h, d);
 });}
 
-const ACT = {allow:'b-green',flag:'b-amber',block:'b-red'};
+const ACT = {allow:'b-green',quarantine:'b-amber',block:'b-red'};
 function runModerate(){ busy(event.target, async ()=>{
   const d = await post('/play/moderate',{text:$('mo-text').value, context:$('mo-ctx').value, deep_scan:$('mo-deep').checked});
   if(d.error) return show($('mo-res'), badge('b-red','error'), d);
-  let h = badge(ACT[d.action], 'action: '+d.action) +
+  let h = badge(ACT[d.action]||'b-blue', d.action+' · '+d.visibility) +
     badge(d.toxicity.label==='clean'?'b-green':'b-red','toxicity: '+d.toxicity.label) +
+    (d.needs_human_review? badge('b-amber','→ review ('+d.review_priority+')'):'') +
     (d.distress.escalate_to_human? badge('b-red','⚠ DISTRESS → human ('+d.distress.severity+')'):badge('b-green','no distress'));
+  if(d.reasons?.length) h += kv('reasons','<br>• '+d.reasons.join('<br>• '));
   show($('mo-res'), h, d);
 });}
 
@@ -319,9 +378,55 @@ function runSearch(){ busy(event.target, async ()=>{
 });}
 function runRecommend(){ busy(event.target, async ()=>{
   const d = await post('/play/recommend',{user_interests:list($('re-int').value), user_conditions:list($('re-cond').value),
-    context:$('re-ctx').value, k:Number($('re-k').value)||5, exclude:[]});
+    seed_content_ids:list($('re-seed').value), context:$('re-ctx').value, k:Number($('re-k').value)||5, exclude:[]});
   if(d.error) return show($('re-res'), badge('b-red','error'), d);
   show($('re-res'), badge('b-violet','strategy: '+d.strategy) + hits(d.recommendations), d);
+});}
+
+// ── Tier 3 + voice ──
+const SEV = {contraindicated:'b-red',major:'b-red',moderate:'b-amber',minor:'b-blue',none:'b-green'};
+function runMeds(){ busy(event.target, async ()=>{
+  const meds = $('md-list').value.split(/[\n,]/).map(x=>x.trim()).filter(Boolean);
+  const d = await post('/play/medications',{medications:meds, use_llm:$('md-llm').checked});
+  if(d.error) return show($('md-res'), badge('b-red','error'), d);
+  let h = badge(SEV[d.highest_severity]||'b-blue', 'highest: '+d.highest_severity) +
+    badge(d.interaction_count?'b-amber':'b-green', d.interaction_count+' interaction(s)') +
+    (d.unrecognized?.length? badge('b-violet','unrecognized: '+d.unrecognized.join(', ')):'');
+  if(d.interactions?.length) h += '<div class="cards">'+d.interactions.map(i=>
+    '<div class="card"><div class="t">['+i.severity+'] '+i.drug_a+' + '+i.drug_b+'</div><div class="m">'+i.effect+(i.management?'<br><i>'+i.management+'</i>':'')+'</div></div>').join('')+'</div>';
+  show($('md-res'), h, d);
+});}
+
+function runIntake(){ busy(event.target, async ()=>{
+  const d = await post('/play/intake',{symptoms:$('in-sym').value, age:Number($('in-age').value)||null,
+    sex:$('in-sex').value||null, duration:$('in-dur').value||null,
+    existing_conditions:list($('in-cond').value), medications:list($('in-meds').value), use_llm:$('in-llm').checked});
+  if(d.error) return show($('in-res'), badge('b-red','error'), d);
+  let h = badge(URG[d.urgency_level]||'b-blue', d.urgency_level.toUpperCase()) +
+    (d.emergency? badge('b-red','⚠ EMERGENCY — seek care now'):'') +
+    (d.degraded? badge('b-amber','degraded (LLM off)'):badge('b-green','structured')) +
+    kv('chief complaint', d.chief_complaint) + kv('summary', d.structured_summary);
+  if(d.clarifying_questions?.length) h += kv('clarifying questions','<br>• '+d.clarifying_questions.join('<br>• '));
+  h += kv('guidance', d.patient_guidance);
+  show($('in-res'), h, d);
+});}
+
+function runTranscribe(){ busy(event.target, async ()=>{
+  const f = $('ts-file').files[0];
+  if(!f) return show($('ts-res'), badge('b-amber','choose an audio file first'), {});
+  const fd = new FormData();
+  fd.append('audio', f);
+  fd.append('language', $('ts-lang').value);
+  fd.append('diarize_stereo', $('ts-stereo').checked);
+  fd.append('channel_roles', $('ts-roles').value);
+  const d = await (await fetch('/play/transcribe',{method:'POST', body:fd})).json();
+  if(d.error) return show($('ts-res'), badge('b-red','error'), d);
+  let h = badge('b-green', d.diarized?'diarized':'transcript') +
+    kv('language', d.language_detected+' ('+d.language_confidence+')') +
+    kv('confidence', d.confidence) + kv('duration (s)', d.duration_seconds) + kv('whisper ms', d.whisper_ms);
+  h += '<div class="cards"><div class="card"><div class="t">Transcript</div><div class="m" style="white-space:pre-wrap">'+
+    (d.transcript||'(empty)')+'</div></div></div>';
+  show($('ts-res'), h, d);
 });}
 function runIndex(){ busy(event.target, async ()=>{
   let items; try { items = JSON.parse($('ix-json').value); } catch(e){ return show($('ix-res'), badge('b-red','invalid JSON'), {error:String(e)}); }

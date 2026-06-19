@@ -21,8 +21,13 @@ Then open **http://localhost:8800**.
 These run on rules / CPU and work immediately:
 
 - **Triage** — red-flag rules → emergency (LLM only refines non-red-flag cases)
-- **Moderation** — toxicity keywords + distress patterns
-- **Semantic search** / **Recommendations** / **Add content** — embeddings (CPU)
+- **Moderation** — toxicity + distress → graduated content-state (allow / quarantine / block)
+- **Drug interactions** — curated rule base (LLM optional, advisory-only)
+- **Symptom intake** — red-flag triage net (LLM only structures the complaint)
+- **Transcribe (voice)** — upload an audio clip → Whisper transcript (self-hosted,
+  no LLM); optional stereo speaker-split. First run loads the Whisper model.
+- **Semantic search** / **Recommendations** (incl. cold-start by recent content) /
+  **Add content** — embeddings (CPU)
 
 With the LLM **off**, the LLM-powered tabs still respond, but with their
 fail-safe / degraded result (which is worth seeing).

@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel
@@ -146,6 +146,7 @@ def search(body: SearchIn):
 class RecommendIn(BaseModel):
     user_interests: list[str] = []
     user_conditions: list[str] = []
+    seed_content_ids: list[str] = []
     context: str = ""
     k: int = 10
     exclude: list[str] = []
@@ -155,7 +156,7 @@ class RecommendIn(BaseModel):
 def recommend(body: RecommendIn):
     from app.search import recommend as _recommend
     return _safe(_recommend, body.user_interests, body.user_conditions,
-                 body.context, body.k, body.exclude)
+                 body.context, body.k, body.exclude, body.seed_content_ids)
 
 
 class ContentItemIn(BaseModel):
@@ -173,6 +174,85 @@ class IndexIn(BaseModel):
 def index_content(body: IndexIn):
     from app.search import index_content as _index
     return _safe(_index, [i.model_dump() for i in body.items])
+
+
+# ── Tier-3 clinical assist ────────────────────────────────────────────────────
+
+class MedsIn(BaseModel):
+    medications: list[str]
+    use_llm: bool = False
+
+
+@app.post("/play/medications")
+def medications(body: MedsIn):
+    from app.meds import check_interactions
+    return _safe(check_interactions, body.medications, body.use_llm)
+
+
+class IntakeIn(BaseModel):
+    symptoms: str
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    duration: Optional[str] = None
+    existing_conditions: list[str] = []
+    medications: list[str] = []
+    use_llm: bool = True
+
+
+@app.post("/play/intake")
+def intake(body: IntakeIn):
+    from app.intake import build_intake
+    return _safe(build_intake, body.symptoms, age=body.age, sex=body.sex,
+                 duration=body.duration, existing_conditions=body.existing_conditions,
+                 medications=body.medications, use_llm=body.use_llm)
+
+
+# ── Voice / audio transcription (Whisper, in-process) ─────────────────────────
+
+_whisper = None
+
+
+def _get_whisper():
+    """Lazy-load faster-whisper on the first transcribe — keeps startup light."""
+    global _whisper
+    if _whisper is None:
+        import os
+        from faster_whisper import WhisperModel
+        from app.core.config import get_settings
+        s = get_settings()
+        logger.info(f"Playground: loading Whisper [{s.WHISPER_MODEL_SIZE}] "
+                    f"(first transcribe only; this can take a moment)…")
+        _whisper = WhisperModel(
+            s.WHISPER_MODEL_SIZE, device=s.WHISPER_DEVICE,
+            compute_type=s.WHISPER_COMPUTE_TYPE,
+            download_root=os.path.join(s.MODELS_DIR, "whisper"),
+        )
+    return _whisper
+
+
+@app.post("/play/transcribe")
+def transcribe(audio: UploadFile = File(...), language: str = Form(""),
+               diarize_stereo: bool = Form(False), channel_roles: str = Form("")):
+    """Upload an audio file → transcript (with optional stereo speaker-split),
+    exactly what the /transcribe task does — but in-process so you can try a clip."""
+    import os
+    import tempfile
+    from app.tasks.consultation_tasks import _transcribe
+
+    def _go():
+        whisper = _get_whisper()
+        suffix = os.path.splitext(audio.filename or "audio.wav")[1] or ".wav"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        try:
+            tmp.write(audio.file.read())
+            tmp.close()
+            roles = [r.strip() for r in channel_roles.split(",") if r.strip()] or None
+            fields, ms = _transcribe(whisper, tmp.name, language or None, diarize_stereo, roles)
+            return {**fields, "whisper_ms": round(ms)}
+        finally:
+            os.unlink(tmp.name)
+
+    return _safe(_go)
 
 
 if __name__ == "__main__":
