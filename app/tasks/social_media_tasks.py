@@ -81,23 +81,15 @@ def task_moderate(
         flagged_reasons = []
         text_lower = text.lower()
 
-        # ── Layer 1: Misinformation (ONNX classifier) ─────────────────────
-        session, tokenizer = self.registry.misinfo
-        misinfo_score = 0.0
-        if session is not None:
-            id2label = self.registry.get_id2label("misinfo")
-            t_onnx = time.perf_counter()
-            scores = run_onnx_classifier(session, tokenizer, text, id2label=id2label)
-            persist_inference_metric(task_id, "misinfo", (time.perf_counter() - t_onnx) * 1000,
-                                     scores[0]["label"], scores[0]["score"])
-            misinfo_score = next((s["score"] for s in scores if s["label"] == "FAKE"), 0.0)
-        if misinfo_score >= settings.MISINFO_THRESHOLD:
-            flagged_reasons.append(f"Health misinformation detected (score: {misinfo_score:.2f})")
-
-        # ── Layer 2: Health claim patterns ────────────────────────────────
+        # ── Layer 1: Health claim patterns ────────────────────────────────
+        # Misinformation is NOT scored here. The old ONNX FAKE/REAL classifier
+        # failed eval (precision 0.557 — flagged most true health info) and was
+        # retired. A flagged health claim is the trigger to run the grounded
+        # RAG check (task_misinfo_check / POST /api/v1/misinfo/check) for an
+        # evidence-cited verdict; this task just surfaces the claim.
         health_claim = bool(get_health_claim_pattern().search(text))
         if health_claim:
-            flagged_reasons.append("Unverified health claim")
+            flagged_reasons.append("Unverified health claim — route to RAG misinfo check")
 
         # ── Layer 3: Toxicity (keyword + classifier) ──────────────────────
         toxic_hits = [kw for kw in get_toxic_keywords() if kw in text_lower]
@@ -111,7 +103,7 @@ def task_moderate(
             flagged_reasons.append("PII detected and redacted")
 
         # ── Verdict ───────────────────────────────────────────────────────
-        if misinfo_score >= 0.90 or (toxicity_score >= 0.7 and len(toxic_hits) > 2):
+        if toxicity_score >= 0.7 and len(toxic_hits) > 2:
             verdict = "rejected"
         elif flagged_reasons:
             verdict = "flagged"
@@ -123,7 +115,6 @@ def task_moderate(
             "task_id": task_id,
             "content_id": content_id,
             "verdict": verdict,
-            "misinformation_score": round(misinfo_score, 3),
             "toxicity_score": round(toxicity_score, 3),
             "health_claim_detected": health_claim,
             "flagged_reasons": flagged_reasons,
@@ -139,7 +130,8 @@ def task_moderate(
             task_id=task_id, task_type="moderate",
             entity_id=content_id, entity_type="content",
             duration_ms=int((time.perf_counter() - t_start) * 1000),
-            result_summary={"misinfo_score": round(misinfo_score, 3), "toxicity_score": round(toxicity_score, 3)},
+            result_summary={"toxicity_score": round(toxicity_score, 3),
+                            "health_claim": health_claim},
             verdict=verdict,
         )
         return result

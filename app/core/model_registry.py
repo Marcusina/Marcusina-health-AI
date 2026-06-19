@@ -45,12 +45,12 @@ class ModelRegistry:
 
     def __init__(self):
         self._whisper: Optional[WhisperModel] = None
-        self._ner_session: Optional[ort.InferenceSession] = None
-        self._ner_tokenizer = None
+        # NER + misinfo ONNX models were retired: NER (d4data) failed eval (entity
+        # F1 0.36) and is now folded into the LLM SOAP call; the misinfo classifier
+        # (0.557 precision) was replaced by the RAG checker (app/rag). Neither is
+        # loaded anymore — see app/clinical and app/rag.
         self._triage_session: Optional[ort.InferenceSession] = None
         self._triage_tokenizer = None
-        self._misinfo_session: Optional[ort.InferenceSession] = None
-        self._misinfo_tokenizer = None
         self._sentiment_session: Optional[ort.InferenceSession] = None
         self._sentiment_tokenizer = None
         self._embedder: Optional[SentenceTransformer] = None
@@ -94,9 +94,7 @@ class ModelRegistry:
         onnx_dir = Path(settings.ONNX_MODELS_DIR)
 
         models = [
-            ("ner",       settings.HF_NER_MODEL,       "_ner_session",       "_ner_tokenizer"),
             ("triage",    settings.HF_TRIAGE_MODEL,     "_triage_session",    "_triage_tokenizer"),
-            ("misinfo",   settings.HF_MISINFO_MODEL,    "_misinfo_session",   "_misinfo_tokenizer"),
             ("sentiment", settings.HF_SENTIMENT_MODEL,  "_sentiment_session", "_sentiment_tokenizer"),
         ]
 
@@ -177,16 +175,8 @@ class ModelRegistry:
         return self._whisper
 
     @property
-    def ner(self) -> tuple[Optional[ort.InferenceSession], object]:
-        return self._ner_session, self._ner_tokenizer
-
-    @property
     def triage(self) -> tuple[Optional[ort.InferenceSession], object]:
         return self._triage_session, self._triage_tokenizer
-
-    @property
-    def misinfo(self) -> tuple[Optional[ort.InferenceSession], object]:
-        return self._misinfo_session, self._misinfo_tokenizer
 
     @property
     def sentiment(self) -> tuple[Optional[ort.InferenceSession], object]:

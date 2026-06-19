@@ -45,17 +45,11 @@ def _safe_remove(path):
 os.remove = _safe_remove
 # ─────────────────────────────────────────────────────────────────────────────
 
+# NER and misinfo were retired (NER folded into the LLM SOAP call; misinfo
+# replaced by the RAG checker), so they are no longer exported or loaded.
 MODELS = {
-    "ner": {
-        "hf_id": settings.HF_NER_MODEL,
-        "task": "token-classification",       # MUST be token-classification for NER
-    },
     "triage": {
         "hf_id": settings.HF_TRIAGE_MODEL,
-        "task": "text-classification",
-    },
-    "misinfo": {
-        "hf_id": settings.HF_MISINFO_MODEL,
         "task": "text-classification",
     },
     "sentiment": {

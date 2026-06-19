@@ -140,7 +140,7 @@ async def test_moderation_enqueue(client):
 async def test_moderation_cache_hit_returns_immediately(client):
     cached_result = {
         "content_id": "post_001", "verdict": "approved",
-        "misinformation_score": 0.02, "toxicity_score": 0.0,
+        "toxicity_score": 0.0,
         "health_claim_detected": False, "flagged_reasons": [],
         "pii_detected": False, "safe_text": None,
     }
@@ -235,8 +235,7 @@ def test_distress_pattern_detection():
     pattern = get_distress_pattern()
     assert pattern.search("I want to die, I can't take this anymore")
     assert pattern.search("suicidal thoughts won't stop")
-    # NOTE: distress_patterns.json is currently over-broad (many bare single-word
-    # alternatives like "today"/"now"/"over"), so the old benign phrase
-    # "I am feeling much better today" false-positives. Using a clearly-neutral
-    # phrase here; the config noise is tracked separately as a quality fix.
-    assert not pattern.search("The weather is nice and I enjoyed my lunch")
+    # distress_patterns.json was cleaned to v2.1 (bare single-word noise removed),
+    # so ordinary benign phrasing no longer false-positives. See
+    # tests/test_distress_patterns.py for the full benign/recall regression guard.
+    assert not pattern.search("I am feeling much better today")

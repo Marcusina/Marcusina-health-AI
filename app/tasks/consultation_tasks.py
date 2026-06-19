@@ -21,7 +21,7 @@ from app.core.config import get_settings
 from app.core.model_registry import get_model_registry, run_onnx_classifier
 from app.utils.cache import make_cache_key, sync_get_cached, sync_cache_result
 from app.utils.audit import log_triage, log_soap_generated, log_transcription
-from app.utils.config_loader import get_red_flags, get_icd_map, get_specialty_map
+from app.utils.config_loader import get_red_flags, get_specialty_map
 from app.db.repositories import persist_task_result, persist_inference_metric
 
 settings = get_settings()
@@ -457,66 +457,6 @@ def task_summary(self, task_id: str, session_id: str, transcript: str,
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _extract_entities_onnx(session, tokenizer, text: str) -> dict:
-    """NER via ONNX Runtime. Returns categorised entity dict."""
-    entities = {"medications": [], "diagnoses": [], "symptoms": [], "vitals": [], "procedures": []}
-    if session is None:
-        return entities
-
-    inputs = tokenizer(text[:512], return_tensors="np", truncation=True)
-    ort_inputs = {k: v for k, v in inputs.items() if k in [i.name for i in session.get_inputs()]}
-    logits = session.run(None, ort_inputs)[0][0]
-
-    # Simplified entity extraction from token classifications
-    tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-    id2label = getattr(tokenizer, "id2label", {})
-
-    for token, label_id in zip(tokens, logits.argmax(axis=-1)):
-        if token in ["[CLS]", "[SEP]", "[PAD]"]:
-            continue
-        label = id2label.get(int(label_id), "O").upper()
-        word = token.replace("##", "").strip()
-        if not word or label == "O":
-            continue
-        if "DRUG" in label or "MED" in label:
-            entities["medications"].append(word)
-        elif "DISEASE" in label or "COND" in label:
-            entities["diagnoses"].append(word)
-        elif "SYMPTOM" in label or "SIGN" in label:
-            entities["symptoms"].append(word)
-
-    return {k: list(set(v)) for k, v in entities.items()}
-
-
-
-def _suggest_icd(entities: dict) -> list[str]:
-    icd_map = get_icd_map()
-    codes = []
-    all_terms = entities.get("diagnoses", []) + entities.get("symptoms", [])
-    for term in all_terms:
-        for keyword, code in icd_map.items():
-            if keyword in term.lower() and code not in codes:
-                codes.append(code)
-    return codes[:5]
-
-
-def _rule_based_soap(transcript: str, entities: dict) -> dict:
-    """
-    Lightweight SOAP construction from transcript + NER entities.
-    Replace with a fine-tuned ONNX summariser for higher quality.
-    """
-    meds = ", ".join(entities.get("medications", [])) or "none noted"
-    diag = ", ".join(entities.get("diagnoses", [])) or "to be determined"
-    syms = ", ".join(entities.get("symptoms", [])) or "as per transcript"
-
-    return {
-        "subjective": f"Patient reports: {syms}. Transcript excerpt: {transcript[:300]}...",
-        "objective": f"Extracted findings — Vitals: {entities.get('vitals', [])}. "
-                     f"Procedures discussed: {entities.get('procedures', [])}.",
-        "assessment": f"Probable diagnoses: {diag}.",
-        "plan": f"Medications considered: {meds}. Follow-up as clinically indicated.",
-    }
 
 
 def _send_callback(callback_url: str | None, task_id: str, result: dict):
