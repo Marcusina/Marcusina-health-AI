@@ -144,8 +144,10 @@ POST /api/v1/recommend
 
 `strategy: "trending"` is the fallback when the profile is empty or the index has
 no content yet. `context: "after_consultation"` boosts explanatory articles/guides.
-(Note: the index is per-process for now; multi-worker deployments need a periodic
-rebuild or a shared store — see the design doc.)
+(Multi-worker note: disk is the source of truth — writes take a cross-process lock
+and merge the latest before saving atomically, and reads reload when another worker
+has written. Consistent across workers on a single host with no extra infra;
+multi-HOST scaling would move persistence to Redis/pgvector.)
 
 ### `POST /api/v1/medications/interactions` — drug-drug interaction check ✅ implemented (sync)
 

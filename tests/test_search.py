@@ -84,6 +84,59 @@ def test_save_and_load_roundtrip(tmp_path):
     assert s2.search("diabetes", k=1)[0]["id"] == "a"
 
 
+# ── multi-worker correctness ──────────────────────────────────────────────────
+
+def test_atomic_save_leaves_no_temp_or_munged_files(tmp_path):
+    _store().save(tmp_path)
+    assert (tmp_path / "vectors.npy").exists() and (tmp_path / "records.jsonl").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert not (tmp_path / "vectors.npy.tmp.npy").exists()   # np.save name-munge guard
+
+
+def test_reload_if_changed_picks_up_another_workers_write(tmp_path):
+    worker_a = VectorStore(embedder=FakeEmbedder(_MAP))
+    worker_b = VectorStore(embedder=FakeEmbedder(_MAP))
+    worker_a.upsert(_ITEMS); worker_a.save(tmp_path)
+    assert worker_b.load(tmp_path) and len(worker_b) == 3
+
+    # A indexes a new item; B shouldn't see it until it reloads.
+    worker_a.upsert([{"id": "d", "text": "diabetes", "type": "article"}])
+    worker_a.save(tmp_path)
+    assert "d" not in worker_b._records
+    assert worker_b.reload_if_changed(tmp_path) is True
+    assert "d" in worker_b._records
+    assert worker_b.reload_if_changed(tmp_path) is False     # unchanged → no reload
+
+
+def test_concurrent_writers_do_not_clobber_each_other(tmp_path):
+    # Mirrors the service write cycle (reload-latest → mutate → save). Without the
+    # reload-before-write, worker B's save would overwrite worker A's item.
+    worker_a = VectorStore(embedder=FakeEmbedder(_MAP))
+    worker_b = VectorStore(embedder=FakeEmbedder(_MAP))
+
+    worker_a.reload_if_changed(tmp_path); worker_a.upsert([_ITEMS[0]]); worker_a.save(tmp_path)  # 'a'
+    worker_b.reload_if_changed(tmp_path); worker_b.upsert([_ITEMS[2]]); worker_b.save(tmp_path)  # 'c'
+
+    final = VectorStore(embedder=FakeEmbedder(_MAP))
+    final.load(tmp_path)
+    assert set(final._records) == {"a", "c"}                 # both survived
+
+
+def test_service_write_path_takes_lock_and_persists(tmp_path, monkeypatch):
+    # Exercises the real index_write_lock + shared-disk persistence via the service.
+    import app.search.store as store_mod
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    monkeypatch.setattr(store_mod, "_LOCK_PATH", tmp_path / "index.lock")
+    monkeypatch.setattr(store_mod, "_store", VectorStore(embedder=FakeEmbedder(_MAP)))
+
+    out = service.index_content(_ITEMS)          # store=None → lock + reload + save
+    assert out["indexed"] == 3
+    assert (tmp_path / "records.jsonl").exists()
+
+    fresh = VectorStore(embedder=FakeEmbedder(_MAP))     # a different worker
+    assert fresh.load(tmp_path) and len(fresh) == 3
+
+
 # ── service ───────────────────────────────────────────────────────────────────
 
 def test_semantic_search_shape():

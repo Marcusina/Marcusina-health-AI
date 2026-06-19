@@ -6,19 +6,25 @@ backend's MongoDB). Embeddings come from the shared CPU sentence-transformer.
 Brute-force cosine is plenty at this scale; swap in FAISS/pgvector here if the
 catalog grows to many thousands of items.
 
-Persistence: the index is saved to disk (vectors.npy + records.jsonl) so it
-survives restarts. NOTE: with multiple Gunicorn workers each process holds its
-own copy — an upsert on one worker is visible to others only after a reload from
-disk (or a rebuild task). For strong cross-worker freshness, move to a shared
-store (Redis/pgvector); this in-process design is the pragmatic v1.
+Persistence & multi-worker correctness: disk is the source of truth. Each worker
+keeps an in-memory copy for fast cosine, but:
+  * writes go through a cross-process file lock and re-read the latest on-disk
+    state before applying their delta, then save atomically (temp file + os.replace).
+    This stops one worker's save from clobbering content another worker added.
+  * reads call reload_if_changed() first — a cheap mtime check that reloads only
+    when another worker has written since. This gives cross-worker freshness on a
+    single host with no extra infra. (Multi-HOST scaling still wants a shared
+    store like Redis/pgvector — swap the persistence layer here.)
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
+from filelock import FileLock
 from loguru import logger
 
 from app.core.config import get_settings
@@ -29,6 +35,15 @@ settings = get_settings()
 INDEX_DIR = Path(settings.MODELS_DIR) / "search"
 SEED_PATH = Path(__file__).parent / "data" / "seed_content.jsonl"
 
+# Serializes writers across processes so concurrent upserts don't lose data.
+_LOCK_PATH = INDEX_DIR / "index.lock"
+
+
+def index_write_lock(timeout: float = 15.0) -> FileLock:
+    """Cross-process lock held around a read-latest → mutate → save cycle."""
+    INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(_LOCK_PATH), timeout=timeout)
+
 
 class VectorStore:
     def __init__(self, embedder: Embedder | None = None):
@@ -37,6 +52,7 @@ class VectorStore:
         self._vectors: dict[str, np.ndarray] = {}  # id -> normalized vector
         self._ids: list[str] = []                  # cached order, aligned to _matrix
         self._matrix: np.ndarray | None = None     # cache, invalidated on change
+        self._loaded_mtime: float | None = None    # mtime of the on-disk index we last loaded
 
     # ── mutations ───────────────────────────────────────────────────────────────
 
@@ -104,10 +120,20 @@ class VectorStore:
         d.mkdir(parents=True, exist_ok=True)
         ids = list(self._records.keys())
         mat = np.vstack([self._vectors[i] for i in ids]) if ids else np.empty((0, 0), "float32")
-        np.save(d / "vectors.npy", mat)
-        with open(d / "records.jsonl", "w", encoding="utf-8") as f:
+
+        # Write to temp files then atomically replace, so a concurrent reader never
+        # sees a half-written index. Replace vectors FIRST and records LAST —
+        # records.jsonl's mtime is the reload trigger, so by the time a reader sees
+        # the new records, the matching vectors are already in place.
+        vtmp, rtmp = d / "vectors.npy.tmp", d / "records.jsonl.tmp"
+        with open(vtmp, "wb") as vf:           # file handle → np.save won't munge the name
+            np.save(vf, mat)
+        with open(rtmp, "w", encoding="utf-8") as f:
             for i in ids:
                 f.write(json.dumps(self._records[i]) + "\n")
+        os.replace(vtmp, d / "vectors.npy")
+        os.replace(rtmp, d / "records.jsonl")
+        self._loaded_mtime = (d / "records.jsonl").stat().st_mtime   # don't reload our own write
         logger.info(f"[search] saved {len(ids)} items to {d}")
 
     def load(self, directory: Path | None = None) -> bool:
@@ -123,8 +149,21 @@ class VectorStore:
             self._records[rec["id"]] = rec
             self._vectors[rec["id"]] = vec
         self._matrix = None
+        self._loaded_mtime = rpath.stat().st_mtime
         logger.info(f"[search] loaded {len(recs)} items from {d}")
         return True
+
+    def reload_if_changed(self, directory: Path | None = None) -> bool:
+        """Reload from disk only if another process has written since we last loaded."""
+        d = directory or INDEX_DIR
+        rpath = d / "records.jsonl"
+        try:
+            mtime = rpath.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        if self._loaded_mtime is None or mtime > self._loaded_mtime:
+            return self.load(d)
+        return False
 
     def load_seed(self) -> int:
         with open(SEED_PATH, encoding="utf-8") as f:
