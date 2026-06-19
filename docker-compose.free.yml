@@ -1,0 +1,132 @@
+# =============================================================================
+# Health AI — FREE-TIER / TEST profile
+# =============================================================================
+# A trimmed, single-instance stack the backend team can run on a small/free host
+# (e.g. an Oracle Cloud Always-Free ARM VM) to test the API contract end to end.
+#
+#   docker compose -f docker-compose.free.yml --env-file .env.free up -d
+#
+# Differences from the production docker-compose.yml:
+#   * one API + one combined Celery worker (all queues) — no nginx/flower/beat
+#   * Whisper defaults to `base` (small) instead of large-v3
+#   * the LLM is OPTIONAL: leave LLM_BASE_URL unset and the generative features
+#     (SOAP, summary, support, LLM-misinfo, intake LLM polish) return degraded
+#     responses instead of failing. All deterministic lanes work fully:
+#     triage rules, distress/toxicity moderation, drug-interactions, search,
+#     recommendations, the quarantine policy.
+#   * sane default creds so it boots with almost-empty .env (NOT for production).
+#
+# Flip to real inference later by pointing LLM_BASE_URL at a GPU (vLLM/Ollama)
+# and setting WHISPER_MODEL_SIZE=large-v3 — config change, no code change.
+# =============================================================================
+
+x-app-base: &app-base
+  build: .
+  environment:
+    - ENVIRONMENT=${ENVIRONMENT:-staging}
+    - API_SECRET_KEY=${API_SECRET_KEY:-dev-secret-change-me}
+    - FASTIFY_CALLBACK_URL=${FASTIFY_CALLBACK_URL:-http://localhost:3000/internal/ai-callback}
+    - FASTIFY_CALLBACK_SECRET=${FASTIFY_CALLBACK_SECRET:-dev-callback-secret}
+    - REDIS_URL=redis://redis:6379/0
+    - REDIS_RESULT_URL=redis://redis:6379/1
+    - RABBITMQ_URL=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672//
+    - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-healthai}:${POSTGRES_PASSWORD:-healthai}@postgres:5432/healthai_db
+    - DATABASE_SYNC_URL=postgresql+psycopg2://${POSTGRES_USER:-healthai}:${POSTGRES_PASSWORD:-healthai}@postgres:5432/healthai_db
+    - MODELS_DIR=/app/models
+    - ONNX_MODELS_DIR=/app/models/onnx
+    - SEARCH_BACKEND=disk
+    - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base}
+    - WHISPER_COMPUTE_TYPE=int8
+    - WHISPER_DEVICE=cpu
+    # LLM is optional in this profile — set it to enable generative features.
+    - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434/v1}
+    - LLM_MODEL=${LLM_MODEL:-granite4.1:8b}
+  volumes:
+    - ai_models:/app/models
+  depends_on:
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+  networks:
+    - health_network
+
+services:
+  api:
+    <<: *app-base
+    command: >
+      gunicorn app.main:app
+        --worker-class uvicorn.workers.UvicornWorker
+        --workers ${API_WORKERS:-2}
+        --bind 0.0.0.0:8001
+        --timeout 60
+        --log-level info
+    ports:
+      - "8001:8001"      # backend points AI_SERVICE_URL at http://<host>:8001
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # One worker drains every queue — fine for a test box.
+  worker:
+    <<: *app-base
+    command: >
+      celery -A app.core.celery_app worker
+        --queues emergency,realtime,normal,batch
+        --concurrency ${WORKER_CONCURRENCY:-2}
+        --hostname free@%h
+        --loglevel info
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - health_network
+
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - health_network
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: healthai_db
+      POSTGRES_USER: ${POSTGRES_USER:-healthai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthai}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-healthai} -d healthai_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - health_network
+
+volumes:
+  ai_models:
+  postgres_data:
+
+networks:
+  health_network:
+    driver: bridge

@@ -6,6 +6,8 @@ venv/
 __pycache__/
 *.env
 *.env.*
+# commit the template; real .env* stay ignored
+!.env.free.example
 *.log
 eval/reports/
 app/rag/data/ingested/
