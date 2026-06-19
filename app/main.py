@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.api.routes.v1 import router as v1_router
 from app.api.routes.sync import router as sync_router
 from app.api.routes.search import router as search_router
+from app.api.routes.clinical_assist import router as clinical_assist_router
 from app.utils.exceptions import register_exception_handlers
 
 settings = get_settings()
@@ -89,6 +90,7 @@ Instrumentator(
 app.include_router(v1_router, prefix="/api/v1")
 app.include_router(sync_router, prefix="/api/v1")   # Tier-1 sync: /triage, /moderate/text
 app.include_router(search_router, prefix="/api/v1") # /search, /recommend, /content/*
+app.include_router(clinical_assist_router, prefix="/api/v1")  # Tier-3: /medications/interactions
 
 
 @app.get("/health", tags=["Health"])

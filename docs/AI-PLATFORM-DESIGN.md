@@ -89,8 +89,8 @@ and embeddings. Ranked by phase.
 |---|-----------|-----------|--------|
 | 10 | **Content recommendations / feed ranking** ✅ | social feed | embeddings + in-process vector store (self-hosted) |
 | 11 | **Semantic search** (meds, providers, content) ✅ | search endpoints | embeddings |
-| 12 | **Medication / drug-interaction check** | `presAndMeds/prescriptions` | local LLM + retrieval, **clinician-confirmed** |
-| 13 | **Pre-consultation symptom intake assistant** | new conversational surface | local LLM (function calling → booking) | advisory, not diagnosis |
+| 12 | **Medication / drug-interaction check** ✅ | `presAndMeds/prescriptions` | curated deterministic rule base (authoritative) + optional LLM advisory, **clinician-confirmed** |
+| 13 | **Pre-consultation symptom intake assistant** ✅ | new conversational surface | red-flag triage net (authoritative) + local LLM structuring; advisory, not diagnosis |
 
 ---
 

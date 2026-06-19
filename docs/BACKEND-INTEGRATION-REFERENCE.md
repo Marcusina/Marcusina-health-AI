@@ -147,6 +147,52 @@ no content yet. `context: "after_consultation"` boosts explanatory articles/guid
 (Note: the index is per-process for now; multi-worker deployments need a periodic
 rebuild or a shared store — see the design doc.)
 
+### `POST /api/v1/medications/interactions` — drug-drug interaction check ✅ implemented (sync)
+
+Deterministic curated rules are authoritative; an optional LLM pass (`use_llm`)
+only adds **candidates for review**. The service never declares a combination
+safe — an empty `interactions` list means "nothing in our reference set", not
+"cleared". Always `needs_human_review: true` (clinician/pharmacist confirms).
+
+```jsonc
+POST /api/v1/medications/interactions
+{ "medications": ["Coumadin 5mg", "Advil", "Viagra", "isosorbide mononitrate"],
+  "patient_id": "p_123", "use_llm": false }   // brand names + dosage text tolerated
+// → { "medications_checked": ["warfarin","ibuprofen","sildenafil","isosorbide"],
+//     "unrecognized": [],                          // names we couldn't match — NOT cleared
+//     "interactions": [ { "drug_a","drug_b","severity","effect","management","source" } ],
+//     "interaction_count": 2, "highest_severity": "contraindicated",
+//     "has_contraindication": true,
+//     "llm_advisory": [],                           // unverified extra candidates if use_llm
+//     "advisory": "Advisory only. …", "needs_human_review": true }
+```
+
+`severity` ∈ `contraindicated | major | moderate | minor`. Gate prescribing UI on
+`has_contraindication` / `highest_severity`, but surface, don't auto-block.
+
+### `POST /api/v1/intake/symptoms` — pre-consultation symptom intake ✅ implemented (sync)
+
+Turns a patient's free-text complaint into a structured intake + clarifying
+questions for the clinician. The **red-flag triage net is authoritative** for
+urgency and is never downgraded by the LLM; the LLM only structures (and is
+skipped/failed-safe when down → `degraded: true`). Advisory, never a diagnosis.
+
+```jsonc
+POST /api/v1/intake/symptoms
+{ "symptoms": "sore throat and mild fever for 3 days", "age": 28, "sex": "F",
+  "duration": "3 days", "existing_conditions": [], "medications": [],
+  "patient_id": "p_123", "use_llm": true }
+// → { "chief_complaint": "...", "structured_summary": "...",
+//     "clarifying_questions": ["...","..."],
+//     "urgency_level": "emergency|urgent|semi_urgent|non_urgent|self_care",
+//     "red_flag_symptoms": [], "recommended_specialty": "...",
+//     "emergency": false, "patient_guidance": "...", "disclaimer": "...",
+//     "degraded": false, "needs_human_review": true }
+```
+
+If `emergency: true` (or `red_flag_symptoms` non-empty), route the patient to
+urgent care immediately and show `patient_guidance` — do not wait on the LLM fields.
+
 ---
 
 ## 4. Async endpoints (enqueue → callback)

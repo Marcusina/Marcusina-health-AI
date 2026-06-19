@@ -302,3 +302,72 @@ class AuditEventItem(BaseModel):
     entity_id: Optional[str] = None
     data: Optional[dict] = None
     created_at: Optional[str] = None
+
+
+# ============================================================================ #
+# Tier-3 — drug-interaction check (#12)                                         #
+# ============================================================================ #
+
+class DrugInteractionRequest(BaseModel):
+    medications: list[str] = Field(..., min_length=1,
+        description="Medication names (brand or generic; dosage text is tolerated)")
+    patient_id: Optional[str] = Field(None, description="For your correlation")
+    use_llm: bool = Field(False,
+        description="Add an advisory LLM pass for additional candidate interactions (slower)")
+
+
+class DrugInteraction(BaseModel):
+    drug_a: str
+    drug_b: str
+    severity: Literal["contraindicated", "major", "moderate", "minor"]
+    effect: str
+    management: Optional[str] = None
+    source: str
+
+
+class DrugInteractionResult(BaseModel):
+    medications_checked: list[str]
+    unrecognized: list[str] = Field(default_factory=list,
+        description="Could not be matched to the reference set — NOT cleared as safe")
+    interactions: list[DrugInteraction] = Field(default_factory=list)
+    interaction_count: int
+    highest_severity: Literal["contraindicated", "major", "moderate", "minor", "none"]
+    has_contraindication: bool
+    llm_advisory: list[DrugInteraction] = Field(default_factory=list,
+        description="Unverified additional candidates from the LLM — for human review only")
+    advisory: str
+    needs_human_review: bool = True
+    llm_used: bool = False
+    model_version: str
+
+
+# ============================================================================ #
+# Tier-3 — pre-consultation symptom intake (#13)                                #
+# ============================================================================ #
+
+class SymptomIntakeRequest(BaseModel):
+    symptoms: str = Field(..., min_length=1, description="Patient's free-text complaint")
+    age: Optional[int] = Field(None, ge=0, le=120)
+    sex: Optional[str] = None
+    duration: Optional[str] = Field(None, description="e.g. '3 days', 'since this morning'")
+    existing_conditions: list[str] = Field(default_factory=list)
+    medications: list[str] = Field(default_factory=list)
+    patient_id: Optional[str] = Field(None, description="For your correlation")
+    use_llm: bool = True
+
+
+class SymptomIntakeResult(BaseModel):
+    chief_complaint: str
+    structured_summary: str
+    clarifying_questions: list[str] = Field(default_factory=list)
+    urgency_level: Literal["emergency", "urgent", "semi_urgent", "non_urgent", "self_care"]
+    red_flag_symptoms: list[str] = Field(default_factory=list,
+        description="Deterministic safety net — if non-empty, treat as emergency")
+    recommended_specialty: str = "General Practitioner"
+    emergency: bool
+    patient_guidance: str
+    disclaimer: str
+    degraded: bool = False
+    needs_human_review: bool = True
+    llm_used: bool = False
+    model_version: str
