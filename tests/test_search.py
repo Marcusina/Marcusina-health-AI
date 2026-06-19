@@ -242,6 +242,37 @@ def test_recommend_reason_mentions_interest():
     assert "diabetes diet" in out["recommendations"][0]["reason"]
 
 
+def test_recommend_cold_start_by_recent_engagement():
+    # No interests given — recommend from what the user just engaged with.
+    # 'a2' shares 'a's vector, so seeding ['a'] should surface 'a2' first.
+    s = VectorStore(embedder=FakeEmbedder(_MAP))
+    s.upsert(_ITEMS + [{"id": "a2", "text": "diabetes", "type": "article"}])
+    out = service.recommend(seed_content_ids=["a"], k=2, store=s)
+    assert out["strategy"] == "similar_to_recent"
+    ids = [r["content_id"] for r in out["recommendations"]]
+    assert "a" not in ids                       # never recommend the seed back
+    assert ids[0] == "a2"                        # nearest neighbour of the seed
+    assert "recently viewed" in out["recommendations"][0]["reason"]
+
+
+def test_recommend_cold_start_ignored_when_seed_unknown():
+    # Unknown seed ids → fall through to trending, not a crash.
+    out = service.recommend(seed_content_ids=["nope"], k=2, store=_store())
+    assert out["strategy"] == "trending"
+
+
+def test_recommend_trending_ranks_by_popularity():
+    s = VectorStore(embedder=FakeEmbedder(_MAP))
+    s.upsert([
+        {"id": "x", "text": "diabetes diet", "type": "article", "metadata": {"popularity": 1}},
+        {"id": "y", "text": "malaria prevention", "type": "guide", "metadata": {"popularity": 99}},
+        {"id": "z", "text": "heart exercise", "type": "article", "metadata": {"popularity": 50}},
+    ])
+    out = service.recommend(k=3, store=s)        # no interests, no seed → trending
+    assert out["strategy"] == "trending"
+    assert [r["content_id"] for r in out["recommendations"]] == ["y", "z", "x"]
+
+
 # ── gated real-embedder integration ───────────────────────────────────────────
 
 @pytest.mark.skipif(not os.environ.get("RUN_SLOW_TESTS"),

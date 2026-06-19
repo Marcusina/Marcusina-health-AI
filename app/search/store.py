@@ -113,10 +113,18 @@ class VectorStore:
     def search(self, query: str, k: int = 10, type_filter: str | None = None) -> list[dict]:
         if not self._records:
             return []
+        q = l2_normalize(embed([query], self._embedder))[0]
+        return self.search_by_vector(q, k=k, type_filter=type_filter)
+
+    def search_by_vector(self, qvec: np.ndarray, k: int = 10,
+                         type_filter: str | None = None) -> list[dict]:
+        """Cosine search against an already-embedded query vector (e.g. an engagement
+        centroid for cold-start recs), so callers don't have to go through text."""
+        if not self._records:
+            return []
         if self._matrix is None:
             self._rebuild()
-        q = l2_normalize(embed([query], self._embedder))[0]
-        scores = self._matrix @ q
+        scores = self._matrix @ qvec
         order = np.argsort(-scores)
         out: list[dict] = []
         for idx in order:
@@ -127,6 +135,21 @@ class VectorStore:
             if len(out) >= k:
                 break
         return out
+
+    def vector_of(self, content_id: str) -> np.ndarray | None:
+        return self._vectors.get(content_id)
+
+    def trending(self, k: int = 10, exclude: set[str] | None = None,
+                 type_filter: str | None = None) -> list[dict]:
+        """Cold-start fallback: rank by the `popularity` signal the backend pushes in
+        metadata (e.g. view/like counts), newest-id as a stable tiebreak."""
+        exclude = exclude or set()
+        items = [r for r in self._records.values()
+                 if r["id"] not in exclude and (not type_filter or r["type"] == type_filter)]
+        items.sort(key=lambda r: r["id"])                       # stable tiebreak
+        items.sort(key=lambda r: float(r.get("metadata", {}).get("popularity", 0) or 0),
+                   reverse=True)
+        return items[:k]
 
     # ── disk persistence (used by DiskBackend and tests) ─────────────────────────
 

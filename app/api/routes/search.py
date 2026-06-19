@@ -33,6 +33,7 @@ def search(req: SearchRequest) -> SearchResponse:
 def recommend_content(req: RecommendQuery) -> RecommendResponse:
     return RecommendResponse(**recommend(
         interests=req.user_interests, conditions=req.user_conditions,
+        seed_content_ids=req.seed_content_ids,
         context=req.context, k=req.k, exclude=req.exclude,
     ))
 

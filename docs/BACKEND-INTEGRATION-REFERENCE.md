@@ -142,15 +142,24 @@ POST /api/v1/search
 { "query": "how to manage blood sugar", "k": 10, "content_type": "article" }   // type optional
 // → { "query": "...", "results": [ { "content_id", "type", "title", "score", "metadata" } ], "count": 10 }
 
-// Recommendations (build from the user's profile):
+// Recommendations — pass whatever signal you have; the service picks the strategy:
 POST /api/v1/recommend
 { "user_interests": ["diabetes"], "user_conditions": ["hypertension"],
+  "seed_content_ids": ["post_3", "post_7"],   // items the user recently viewed/liked
   "context": "after_consultation", "k": 10, "exclude": ["post_9"] }
-// → { "recommendations": [ { "content_id", "type", "title", "reason", "score" } ], "strategy": "content_based|trending" }
+// → { "recommendations": [ { "content_id", "type", "title", "reason", "score" } ],
+//     "strategy": "similar_to_recent | content_based | trending" }
 ```
 
-`strategy: "trending"` is the fallback when the profile is empty or the index has
-no content yet. `context: "after_consultation"` boosts explanatory articles/guides.
+Strategy is chosen by the strongest signal available:
+- **`similar_to_recent`** — if `seed_content_ids` are given, recommends content similar
+  to what the user just engaged with (a centroid of those items' embeddings). This is
+  the **cold-start** answer when you don't know the user's interests yet — the AI never
+  reads your DB, so feed it recent behavior and it infers taste.
+- **`content_based`** — uses `user_interests` / `user_conditions` text.
+- **`trending`** — last-resort fallback, **ranked by popularity**: push a numeric
+  `metadata.popularity` (e.g. view/like count) when you `/content/index`, and trending
+  orders by it. `context: "after_consultation"` boosts explanatory articles/guides.
 (Scaling note: the index has a pluggable backend via `SEARCH_BACKEND`. `disk`
 (default) is correct for multiple workers on one host (file lock + atomic write +
 reload). `redis` shares the index over `REDIS_URL` so **duplicate servers behind a

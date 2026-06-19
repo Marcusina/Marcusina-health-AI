@@ -216,6 +216,9 @@ class SearchRequest(BaseModel):
 class RecommendQuery(BaseModel):
     user_interests: list[str] = Field(default_factory=list)
     user_conditions: list[str] = Field(default_factory=list)
+    seed_content_ids: list[str] = Field(default_factory=list,
+        description="content_ids the user recently engaged with — drives cold-start "
+                    "recs ('more like this') when interests aren't known")
     context: str = Field("", description="e.g. 'after_consultation'")
     k: int = Field(10, ge=1, le=50)
     exclude: list[str] = Field(default_factory=list, description="content_ids already seen")
@@ -239,7 +242,7 @@ class SearchResponse(BaseModel):
 
 class RecommendResponse(BaseModel):
     recommendations: list[SearchHit]
-    strategy: Literal["content_based", "trending"]
+    strategy: Literal["content_based", "similar_to_recent", "trending"]
     model_version: str
 
 
