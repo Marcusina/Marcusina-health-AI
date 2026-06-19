@@ -9,3 +9,4 @@ __pycache__/
 *.log
 eval/reports/
 app/rag/data/ingested/
+.claude/
