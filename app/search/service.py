@@ -10,7 +10,7 @@ Both are fast, CPU-only, and synchronous. Output shapes match the API schemas.
 
 from __future__ import annotations
 
-from app.search.store import get_store, index_write_lock, VectorStore
+from app.search.store import get_store, get_backend, index_write_lock, VectorStore
 
 SEARCH_VERSION = "search-embed/2026.06"
 
@@ -19,7 +19,7 @@ def semantic_search(query: str, k: int = 10, content_type: str | None = None,
                     store: VectorStore | None = None) -> dict:
     s = store or get_store()
     if store is None:
-        s.reload_if_changed()        # pick up content other workers indexed
+        get_backend().reload_if_changed(s)   # pick up content other workers/hosts indexed
     hits = s.search(query, k=k, type_filter=content_type)
     return {
         "query": query,
@@ -34,7 +34,7 @@ def recommend(interests: list[str] | None = None, conditions: list[str] | None =
               store: VectorStore | None = None) -> dict:
     s = store or get_store()
     if store is None:
-        s.reload_if_changed()        # pick up content other workers indexed
+        get_backend().reload_if_changed(s)   # pick up content other workers/hosts indexed
     exclude_set = set(exclude or [])
     profile = " ".join([*(interests or []), *(conditions or []), context]).strip()
 
@@ -57,13 +57,14 @@ def recommend(interests: list[str] | None = None, conditions: list[str] | None =
 
 def index_content(items: list[dict], persist: bool = True, store: VectorStore | None = None) -> dict:
     s = store or get_store()
-    # For the shared on-disk index, serialize across workers and merge the latest
-    # state before applying our delta, so we don't clobber another worker's writes.
+    # For the shared index, serialize across workers/hosts and merge the latest
+    # state before applying our delta, so we don't clobber another writer's content.
     if persist and store is None:
+        backend = get_backend()
         with index_write_lock():
-            s.reload_if_changed()
+            backend.reload_if_changed(s)
             n = s.upsert(items)
-            s.save()
+            backend.persist(s)
     else:
         n = s.upsert(items)
         if persist:
@@ -74,10 +75,11 @@ def index_content(items: list[dict], persist: bool = True, store: VectorStore | 
 def remove_content(ids: list[str], persist: bool = True, store: VectorStore | None = None) -> dict:
     s = store or get_store()
     if persist and store is None:
+        backend = get_backend()
         with index_write_lock():
-            s.reload_if_changed()
+            backend.reload_if_changed(s)
             n = s.remove(ids)
-            s.save()
+            backend.persist(s)
     else:
         n = s.remove(ids)
         if persist:

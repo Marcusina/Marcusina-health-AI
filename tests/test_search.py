@@ -137,6 +137,84 @@ def test_service_write_path_takes_lock_and_persists(tmp_path, monkeypatch):
     assert fresh.load(tmp_path) and len(fresh) == 3
 
 
+# ── redis backend (multi-host) ────────────────────────────────────────────────
+
+class FakeSyncRedis:
+    """Minimal sync-Redis stand-in: strings, hashes, atomic-enough rename, lock."""
+    def __init__(self):
+        self.kv: dict[str, str] = {}
+        self.hashes: dict[str, dict] = {}
+
+    def get(self, k):
+        return self.kv.get(k)
+
+    def incr(self, k):
+        self.kv[k] = str(int(self.kv.get(k, 0)) + 1)
+        return int(self.kv[k])
+
+    def delete(self, *ks):
+        for k in ks:
+            self.kv.pop(k, None)
+            self.hashes.pop(k, None)
+
+    def hset(self, name, mapping=None):
+        self.hashes.setdefault(name, {}).update(mapping or {})
+
+    def hgetall(self, name):
+        return dict(self.hashes.get(name, {}))
+
+    def rename(self, src, dst):
+        self.hashes[dst] = self.hashes.pop(src)
+
+    def lock(self, name, timeout=None, blocking_timeout=None):
+        import contextlib
+        return contextlib.nullcontext()
+
+
+def _redis_backend(monkeypatch):
+    import app.search.store as store_mod
+    fake = FakeSyncRedis()
+    monkeypatch.setattr("app.utils.cache._get_sync_redis", lambda: fake)
+    monkeypatch.setattr(store_mod.settings, "SEARCH_BACKEND", "redis")
+    return store_mod, fake
+
+
+def test_get_backend_selects_by_config(monkeypatch):
+    store_mod, _ = _redis_backend(monkeypatch)
+    assert isinstance(store_mod.get_backend(), store_mod.RedisBackend)
+    monkeypatch.setattr(store_mod.settings, "SEARCH_BACKEND", "disk")
+    assert isinstance(store_mod.get_backend(), store_mod.DiskBackend)
+
+
+def test_redis_backend_persists_and_other_host_reloads(monkeypatch):
+    store_mod, _ = _redis_backend(monkeypatch)
+    backend = store_mod.RedisBackend()
+
+    host_a = VectorStore(embedder=FakeEmbedder(_MAP)); host_a.upsert(_ITEMS)
+    backend.persist(host_a)
+
+    host_b = VectorStore(embedder=FakeEmbedder(_MAP))     # a different server
+    assert backend.reload_if_changed(host_b) is True
+    assert set(host_b._records) == {"a", "b", "c"}
+    assert host_b.search("diabetes", k=1)[0]["id"] == "a"
+    assert backend.reload_if_changed(host_b) is False     # unchanged → no reload
+
+    host_a.remove(["b"]); backend.persist(host_a)         # A deletes
+    assert backend.reload_if_changed(host_b) is True       # B sees the delete
+    assert "b" not in host_b._records
+
+
+def test_redis_backend_fails_open_when_down(monkeypatch):
+    import app.search.store as store_mod
+    monkeypatch.setattr("app.utils.cache._get_sync_redis", lambda: None)
+    backend = store_mod.RedisBackend()
+    s = VectorStore(embedder=FakeEmbedder(_MAP)); s.upsert(_ITEMS)
+    backend.persist(s)                                     # no redis → no raise
+    assert backend.reload_if_changed(s) is False           # nothing to reload, no raise
+    with backend.lock():                                   # nullcontext, no deadlock
+        pass
+
+
 # ── service ───────────────────────────────────────────────────────────────────
 
 def test_semantic_search_shape():

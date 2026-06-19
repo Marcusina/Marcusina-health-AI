@@ -12,7 +12,13 @@
 #   redis            → Cache + Celery result backend
 #   postgres         → AI-layer persistence (tasks, audit, inference metrics)
 #   flower           → Celery monitoring UI
-#   nginx            → Reverse proxy + rate limiting
+#   nginx            → Load balancer + reverse proxy (entrypoint :80) over the
+#                      ai_api replicas; round-robins, ejects unhealthy ones
+# =============================================================================
+# Scale the API horizontally (duplicate servers behind the load balancer):
+#   docker compose up -d --scale ai_api=3      # or set API_REPLICAS in .env
+# The search index is shared via Redis (SEARCH_BACKEND=redis), so replicas stay
+# consistent. After scaling, `docker compose restart nginx` so it re-resolves.
 # =============================================================================
 
 x-worker-base: &worker-base
@@ -22,6 +28,8 @@ x-worker-base: &worker-base
     - API_SECRET_KEY=${API_SECRET_KEY}
     - REDIS_URL=redis://redis:6379/0
     - REDIS_RESULT_URL=redis://redis:6379/1
+    # Shared search index across all API replicas → duplicate servers stay consistent.
+    - SEARCH_BACKEND=${SEARCH_BACKEND:-redis}
     - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//
     - FASTIFY_CALLBACK_URL=${FASTIFY_CALLBACK_URL}
     - FASTIFY_CALLBACK_SECRET=${FASTIFY_CALLBACK_SECRET}
@@ -46,10 +54,12 @@ x-worker-base: &worker-base
     - health_network
 
 services:
-  # ── FastAPI HTTP Server ──────────────────────────────────────────────────
+  # ── FastAPI HTTP Server (load-balanced by nginx) ─────────────────────────
+  # No container_name / published port so it can scale to N replicas. nginx is
+  # the entrypoint (:80) and round-robins across them; reach the API there.
+  # Run replicas:  docker compose up -d --scale ai_api=3   (or set API_REPLICAS)
   ai_api:
     <<: *worker-base
-    container_name: health_ai_api
     command: >
       gunicorn app.main:app
         --worker-class uvicorn.workers.UvicornWorker
@@ -59,8 +69,10 @@ services:
         --keep-alive 5
         --log-level info
         --access-logfile -
-    ports:
-      - "8001:8001"
+    expose:
+      - "8001"
+    deploy:
+      replicas: ${API_REPLICAS:-2}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 15s

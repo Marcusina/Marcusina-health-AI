@@ -6,19 +6,22 @@ backend's MongoDB). Embeddings come from the shared CPU sentence-transformer.
 Brute-force cosine is plenty at this scale; swap in FAISS/pgvector here if the
 catalog grows to many thousands of items.
 
-Persistence & multi-worker correctness: disk is the source of truth. Each worker
-keeps an in-memory copy for fast cosine, but:
-  * writes go through a cross-process file lock and re-read the latest on-disk
-    state before applying their delta, then save atomically (temp file + os.replace).
-    This stops one worker's save from clobbering content another worker added.
-  * reads call reload_if_changed() first — a cheap mtime check that reloads only
-    when another worker has written since. This gives cross-worker freshness on a
-    single host with no extra infra. (Multi-HOST scaling still wants a shared
-    store like Redis/pgvector — swap the persistence layer here.)
+Persistence is pluggable via an IndexBackend, chosen by `settings.SEARCH_BACKEND`:
+
+  * "disk"  — local files (vectors.npy + records.jsonl), a cross-process file lock,
+    and an mtime-based reload. Correct for multiple workers on ONE host.
+  * "redis" — the shared REDIS_URL holds the index (one hash + a version counter)
+    and a Redis lock serializes writers. Correct across MULTIPLE hosts, so you can
+    run duplicate servers behind a load balancer and they stay consistent.
+
+Either way the pattern is the same: each worker keeps an in-memory copy for fast
+cosine; writes take a lock, re-read the latest, apply their delta, and publish
+atomically; reads reload only when the shared version/mtime has moved.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -35,24 +38,26 @@ settings = get_settings()
 INDEX_DIR = Path(settings.MODELS_DIR) / "search"
 SEED_PATH = Path(__file__).parent / "data" / "seed_content.jsonl"
 
-# Serializes writers across processes so concurrent upserts don't lose data.
+# Disk backend: cross-process file lock so concurrent upserts don't lose data.
 _LOCK_PATH = INDEX_DIR / "index.lock"
 
-
-def index_write_lock(timeout: float = 15.0) -> FileLock:
-    """Cross-process lock held around a read-latest → mutate → save cycle."""
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    return FileLock(str(_LOCK_PATH), timeout=timeout)
+# Redis backend keys (shared across all hosts).
+_REDIS_ITEMS = "health_ai:search:items"        # hash: id -> {"r": record, "v": vector}
+_REDIS_VERSION = "health_ai:search:version"     # int, bumped on every write
+_REDIS_LOCK = "health_ai:search:lock"
 
 
 class VectorStore:
+    """In-memory cosine engine. Persistence is delegated to an IndexBackend."""
+
     def __init__(self, embedder: Embedder | None = None):
         self._embedder = embedder
         self._records: dict[str, dict] = {}        # id -> {id, type, text, metadata}
         self._vectors: dict[str, np.ndarray] = {}  # id -> normalized vector
         self._ids: list[str] = []                  # cached order, aligned to _matrix
         self._matrix: np.ndarray | None = None     # cache, invalidated on change
-        self._loaded_mtime: float | None = None    # mtime of the on-disk index we last loaded
+        self._loaded_sig: tuple | None = None      # disk backend: (mtime_ns, size) we last loaded
+        self._loaded_version: str | None = None    # redis backend: version we last loaded
 
     # ── mutations ───────────────────────────────────────────────────────────────
 
@@ -86,6 +91,16 @@ class VectorStore:
     def __len__(self) -> int:
         return len(self._records)
 
+    def snapshot(self) -> tuple[dict[str, dict], dict[str, np.ndarray]]:
+        """The current records + vectors (for a backend to persist)."""
+        return self._records, self._vectors
+
+    def replace(self, records: dict[str, dict], vectors: dict[str, np.ndarray]) -> None:
+        """Swap in a freshly-loaded dataset (used by a backend on reload)."""
+        self._records = records
+        self._vectors = vectors
+        self._matrix = None
+
     # ── query ─────────────────────────────────────────────────────────────────
 
     def _rebuild(self) -> None:
@@ -113,7 +128,7 @@ class VectorStore:
                 break
         return out
 
-    # ── persistence ─────────────────────────────────────────────────────────────
+    # ── disk persistence (used by DiskBackend and tests) ─────────────────────────
 
     def save(self, directory: Path | None = None) -> None:
         d = directory or INDEX_DIR
@@ -133,8 +148,18 @@ class VectorStore:
                 f.write(json.dumps(self._records[i]) + "\n")
         os.replace(vtmp, d / "vectors.npy")
         os.replace(rtmp, d / "records.jsonl")
-        self._loaded_mtime = (d / "records.jsonl").stat().st_mtime   # don't reload our own write
+        self._loaded_sig = self._disk_sig(d / "records.jsonl")   # don't reload our own write
         logger.info(f"[search] saved {len(ids)} items to {d}")
+
+    @staticmethod
+    def _disk_sig(path: Path) -> tuple | None:
+        # (mtime_ns, size): catches rapid back-to-back writes that share an mtime
+        # tick but change content — mtime alone is too coarse on some filesystems.
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
 
     def load(self, directory: Path | None = None) -> bool:
         d = directory or INDEX_DIR
@@ -149,19 +174,17 @@ class VectorStore:
             self._records[rec["id"]] = rec
             self._vectors[rec["id"]] = vec
         self._matrix = None
-        self._loaded_mtime = rpath.stat().st_mtime
+        self._loaded_sig = self._disk_sig(rpath)
         logger.info(f"[search] loaded {len(recs)} items from {d}")
         return True
 
     def reload_if_changed(self, directory: Path | None = None) -> bool:
-        """Reload from disk only if another process has written since we last loaded."""
+        """Disk: reload only if the file changed since we last loaded."""
         d = directory or INDEX_DIR
-        rpath = d / "records.jsonl"
-        try:
-            mtime = rpath.stat().st_mtime
-        except FileNotFoundError:
+        sig = self._disk_sig(d / "records.jsonl")
+        if sig is None:
             return False
-        if self._loaded_mtime is None or mtime > self._loaded_mtime:
+        if sig != self._loaded_sig:
             return self.load(d)
         return False
 
@@ -173,18 +196,114 @@ class VectorStore:
         return n
 
 
+# ── persistence backends ──────────────────────────────────────────────────────
+
+class DiskBackend:
+    """Local-disk persistence + file lock. Multi-worker safe on a single host."""
+    name = "disk"
+
+    def lock(self, timeout: float = 15.0):
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        return FileLock(str(_LOCK_PATH), timeout=timeout)
+
+    def initial_load(self, store: VectorStore) -> bool:
+        return store.load()
+
+    def reload_if_changed(self, store: VectorStore) -> bool:
+        return store.reload_if_changed()
+
+    def persist(self, store: VectorStore) -> None:
+        store.save()
+
+
+class RedisBackend:
+    """Shared-Redis persistence + Redis lock. Consistent across multiple hosts."""
+    name = "redis"
+
+    @staticmethod
+    def _redis():
+        from app.utils.cache import _get_sync_redis
+        return _get_sync_redis()
+
+    def lock(self, timeout: float = 15.0):
+        r = self._redis()
+        if r is None:
+            logger.warning("[search] Redis unavailable — index write is uncoordinated")
+            return contextlib.nullcontext()
+        # auto-expiring lock so a crashed holder can't deadlock the cluster
+        return r.lock(_REDIS_LOCK, timeout=30.0, blocking_timeout=timeout)
+
+    def initial_load(self, store: VectorStore) -> bool:
+        return self.reload_if_changed(store)
+
+    def reload_if_changed(self, store: VectorStore) -> bool:
+        r = self._redis()
+        if r is None:
+            return False
+        version = r.get(_REDIS_VERSION)
+        if version is None or version == store._loaded_version:
+            return False
+        raw = r.hgetall(_REDIS_ITEMS)
+        records: dict[str, dict] = {}
+        vectors: dict[str, np.ndarray] = {}
+        for _id, payload in raw.items():
+            obj = json.loads(payload)
+            records[_id] = obj["r"]
+            vectors[_id] = np.asarray(obj["v"], dtype="float32")
+        store.replace(records, vectors)
+        store._loaded_version = version
+        logger.info(f"[search] loaded {len(records)} items from Redis (v{version})")
+        return True
+
+    def persist(self, store: VectorStore) -> None:
+        r = self._redis()
+        if r is None:
+            logger.warning("[search] Redis unavailable — index change not shared")
+            return
+        records, vectors = store.snapshot()
+        tmp = f"{_REDIS_ITEMS}:tmp"
+        r.delete(tmp)
+        if records:
+            mapping = {_id: json.dumps({"r": records[_id], "v": vectors[_id].tolist()})
+                       for _id in records}
+            r.hset(tmp, mapping=mapping)
+            r.rename(tmp, _REDIS_ITEMS)        # atomic swap — readers never see a partial hash
+        else:
+            r.delete(_REDIS_ITEMS)
+        version = r.incr(_REDIS_VERSION)
+        store._loaded_version = str(version)
+        logger.info(f"[search] persisted {len(records)} items to Redis (v{version})")
+
+
+def get_backend():
+    """Pick the persistence backend from config (disk by default)."""
+    return RedisBackend() if settings.SEARCH_BACKEND == "redis" else DiskBackend()
+
+
+def index_write_lock(timeout: float = 15.0):
+    """Lock for a read-latest → mutate → persist cycle (disk or Redis backed)."""
+    return get_backend().lock(timeout)
+
+
 _store: VectorStore | None = None
 
 
 def get_store() -> VectorStore:
     """
-    Process-wide store. Loads the persisted index if present; otherwise seeds demo
-    content so search/recommend work out of the box (the backend then ingests real
-    content via the index endpoints).
+    Process-wide store. Loads the shared index if present; otherwise seeds demo
+    content (and publishes it so peers share the same seed) so search/recommend
+    work out of the box. The backend then receives real content via the endpoints.
     """
     global _store
     if _store is None:
-        _store = VectorStore()
-        if not _store.load():
-            _store.load_seed()
+        store = VectorStore()
+        backend = get_backend()
+        backend.initial_load(store)
+        if len(store) == 0:
+            with index_write_lock():
+                backend.reload_if_changed(store)      # a peer may have seeded under the lock
+                if len(store) == 0:
+                    store.load_seed()
+                    backend.persist(store)
+        _store = store
     return _store

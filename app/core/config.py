@@ -132,6 +132,13 @@ class Settings(BaseSettings):
     FAISS_INDEX_PATH: str = "./models/faiss/content_index.bin"
     FAISS_METADATA_PATH: str = "./models/faiss/content_metadata.json"
 
+    # ── Content search index backend ──────────────────────────────────────────
+    # "disk"  → local files + file lock (correct for multiple workers on ONE host)
+    # "redis" → shared REDIS_URL (correct across MULTIPLE hosts → load-balanced
+    #           duplicate servers stay consistent). Set SEARCH_BACKEND=redis when
+    #           running more than one replica.
+    SEARCH_BACKEND: str = "disk"
+
     # ── Inference thresholds ──────────────────────────────────────────────────
     MISINFO_THRESHOLD: float = 0.75
     TRIAGE_EMERGENCY_THRESHOLD: float = 0.85

@@ -151,10 +151,12 @@ POST /api/v1/recommend
 
 `strategy: "trending"` is the fallback when the profile is empty or the index has
 no content yet. `context: "after_consultation"` boosts explanatory articles/guides.
-(Multi-worker note: disk is the source of truth — writes take a cross-process lock
-and merge the latest before saving atomically, and reads reload when another worker
-has written. Consistent across workers on a single host with no extra infra;
-multi-HOST scaling would move persistence to Redis/pgvector.)
+(Scaling note: the index has a pluggable backend via `SEARCH_BACKEND`. `disk`
+(default) is correct for multiple workers on one host (file lock + atomic write +
+reload). `redis` shares the index over `REDIS_URL` so **duplicate servers behind a
+load balancer stay consistent** — set `SEARCH_BACKEND=redis` when running more than
+one replica. The bundled `docker-compose.yml` defaults to `redis` and front-ends
+the API replicas with nginx; scale with `docker compose up -d --scale ai_api=3`.)
 
 ### `POST /api/v1/medications/interactions` — drug-drug interaction check ✅ implemented (sync)
 
