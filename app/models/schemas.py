@@ -175,9 +175,15 @@ class DistressSignal(BaseModel):
 
 
 class ModerateResult(BaseModel):
-    action: Literal["allow", "flag", "block"]
+    action: Literal["allow", "quarantine", "block"] = Field(...,
+        description="allow=publish; quarantine=publish but limit reach + human review; block=withhold")
+    visibility: Literal["public", "limited", "hidden"]
+    needs_human_review: bool = False
+    review_priority: Literal["none", "low", "normal", "high", "urgent"] = "none"
+    reasons: list[str] = Field(default_factory=list)
     toxicity: ToxicitySignal
     distress: DistressSignal
+    policy_version: str = ""
     llm_used: bool = False
     model_version: str
 

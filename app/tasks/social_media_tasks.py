@@ -102,24 +102,34 @@ def task_moderate(
         if pii_detected:
             flagged_reasons.append("PII detected and redacted")
 
-        # ── Verdict ───────────────────────────────────────────────────────
-        if toxicity_score >= 0.7 and len(toxic_hits) > 2:
-            verdict = "rejected"
-        elif flagged_reasons:
-            verdict = "flagged"
-        else:
-            verdict = "approved"
+        # ── Content-state decision (shared graduated policy) ───────────────
+        from app.safety.moderation_policy import decide
+        decision = decide(
+            toxicity_label="toxic" if toxic_hits else "clean",
+            toxicity_score=toxicity_score,
+            toxic_keyword_hit=bool(toxic_hits),
+            health_claim=health_claim,
+            pii_detected=pii_detected,
+        )
+        # Back-compat verdict alias: allow→approved, quarantine→flagged, block→rejected.
+        verdict = {"allow": "approved", "quarantine": "flagged",
+                   "block": "rejected"}[decision["action"]]
 
         result = {
             "success": True,
             "task_id": task_id,
             "content_id": content_id,
             "verdict": verdict,
+            "action": decision["action"],
+            "visibility": decision["visibility"],
+            "needs_human_review": decision["needs_human_review"],
+            "review_priority": decision["review_priority"],
             "toxicity_score": round(toxicity_score, 3),
             "health_claim_detected": health_claim,
-            "flagged_reasons": flagged_reasons,
+            "flagged_reasons": flagged_reasons or decision["reasons"],
             "pii_detected": pii_detected,
             "safe_text": safe_text,
+            "policy_version": decision["policy_version"],
         }
 
         sync_cache_result(cache_key, result, ttl=settings.CACHE_TTL_MODERATION)
@@ -130,7 +140,7 @@ def task_moderate(
             task_id=task_id, task_type="moderate",
             entity_id=content_id, entity_type="content",
             duration_ms=int((time.perf_counter() - t_start) * 1000),
-            result_summary={"toxicity_score": round(toxicity_score, 3),
+            result_summary={"action": decision["action"], "toxicity_score": round(toxicity_score, 3),
                             "health_claim": health_claim},
             verdict=verdict,
         )

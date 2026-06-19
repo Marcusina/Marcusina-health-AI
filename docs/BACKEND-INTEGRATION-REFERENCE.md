@@ -77,7 +77,11 @@ Use on `sendMessage`, post/comment create, `userReport`.
 }
 // 200 response
 {
-  "action": "allow | flag | block",         // your gate: allow=deliver, flag=deliver+queue review, block=hold
+  "action": "allow | quarantine | block",    // content-state to apply (see below)
+  "visibility": "public | limited | hidden",  // the matching reach for that state
+  "needs_human_review": false,                // queue for a human moderator
+  "review_priority": "none | low | normal | high | urgent",
+  "reasons": [],                              // human-readable why (audit + reviewer)
   "toxicity": { "score": 0.02, "label": "clean | toxic | harassment", "matched": [] },
   "distress": {                               // safety-critical
     "detected": false,
@@ -85,14 +89,37 @@ Use on `sendMessage`, post/comment create, `userReport`.
     "escalate_to_human": false,              // if true: route to crisis/clinical workflow
     "matched": []                            // distress phrases that fired (audit)
   },
+  "policy_version": "moderation-policy/2026.06",
   "llm_used": false,                          // whether the LLM was consulted this call
   "model_version": "moderation-rules+llm/2026.06"
 }
 ```
 
+**The content-state machine (`action` → what you do):**
+
+| `action` | `visibility` | What the backend does |
+|----------|--------------|------------------------|
+| `allow` | `public` | Publish/deliver normally |
+| `quarantine` | `limited` | **Publish but limit reach** (out of public feeds/search) **and queue for human review** — the "quarantine" state. Don't delete. |
+| `block` | `hidden` | Withhold from publishing (high-confidence violation only) |
+
+This is the **pre-publish gate**. For deeper checks (PII redaction, health-claim →
+RAG misinfo), also enqueue the async `POST /api/v1/social/moderate`, which returns
+the same `action`/`visibility`/`needs_human_review`/`review_priority` shape via
+callback — so a post can be published, then **quarantined or flagged for review**
+later if the deep scan finds something.
+
 **Rules:**
+- **Escalate, don't delete.** Borderline content is `quarantine` (limited + review),
+  not `block`. Reserve `block` for high-confidence abuse.
+- **Health misinformation is advisory** → it can only `quarantine` for review, never
+  auto-`block` (false positives suppress true health info; a human + the RAG check
+  decide).
+- When `needs_human_review` is true, route to your moderation queue using
+  `review_priority`.
 - If `distress.escalate_to_human` is `true`, route to your human crisis workflow
-  **regardless** of `action`. Distress detection never auto-replies.
+  **regardless** of `action` (distress never hides a post — it's a welfare signal,
+  and it sets `review_priority: urgent`). Distress detection never auto-replies.
 - Toxicity is precision-oriented: curated harmful phrases `block`; otherwise the
   content is `allow`ed unless `deep_scan` + the LLM judge it toxic.
 - Distress always uses the LLM when a pattern fires; if the LLM is unreachable it

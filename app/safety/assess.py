@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from app.safety import rules
 from app.safety import judges
+from app.safety import moderation_policy
 
 TRIAGE_VERSION = "triage-rules+llm/2026.06"
 MODERATION_VERSION = "moderation-rules+llm/2026.06"
@@ -116,26 +117,29 @@ def assess_moderation(text: str, context: str = "post", deep_scan: bool = False)
     distress = assess_distress(text, use_llm=True)
 
     tox_llm_used = False
+    keyword_hit = bool(toxic)
     if toxic:
-        # Curated harmful phrases → remove (per moderation policy).
         toxicity = {"score": 0.95, "label": "toxic", "matched": toxic}
-        action = "block"
     elif deep_scan:
         j = judges.judge_toxicity(text)
         if j is not None:
             tox_llm_used = True
             toxicity = {"score": _TOXICITY_SCORE[j.label], "label": j.label, "matched": []}
-            action = j.action
         else:
-            # No keyword hit, LLM down — precision-oriented default: allow.
+            # No keyword hit, LLM down — precision-oriented default: clean/allow.
             toxicity = {"score": 0.0, "label": "clean", "matched": []}
-            action = "allow"
     else:
         toxicity = {"score": 0.0, "label": "clean", "matched": []}
-        action = "allow"
+
+    # The policy (not the classifier) decides the content-state.
+    decision = moderation_policy.decide(
+        toxicity_label=toxicity["label"], toxicity_score=toxicity["score"],
+        toxic_keyword_hit=keyword_hit,
+        distress_escalate=distress["escalate_to_human"],
+    )
 
     return {
-        "action": action,
+        **decision,                          # action, visibility, needs_human_review, review_priority, reasons, policy_version
         "toxicity": toxicity,
         "distress": {k: distress[k] for k in ("detected", "severity", "escalate_to_human", "matched")},
         "llm_used": bool(tox_llm_used or distress["llm_used"]),
