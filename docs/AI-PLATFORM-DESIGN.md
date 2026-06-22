@@ -61,7 +61,7 @@ the backend just needs to expose the receiving route (see the integration refere
 
 ## 3. Capability map — where AI plugs into the backend
 
-Two engines power everything: **Claude (LLM lane)** for language understanding,
+Two engines power everything: **local LLMs** for language understanding,
 generation, and reasoning; **self-hosted models** for speech, fast classification,
 and embeddings. Ranked by phase.
 
