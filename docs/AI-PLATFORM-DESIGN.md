@@ -21,6 +21,7 @@ Core API     Videocall      Voicecall      AI Service   ← we build/host this
  MongoDB      signaling      signaling      ├─ FastAPI (sync + enqueue)
  Redis        Redis          Redis          ├─ Celery workers (async)
                                             ├─ local LLM server (vLLM/llama.cpp)
+                                            
                                             ├─ self-hosted models (ASR/NLP/embed)
                                             └─ Postgres + Redis (our state only)
 ```
