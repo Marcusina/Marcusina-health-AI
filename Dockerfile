@@ -46,6 +46,7 @@ RUN pip install --no-cache-dir \
     https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
 COPY app/ ./app/
+COPY config/ ./config/
 COPY playground/ ./playground/
 COPY scripts/ ./scripts/
 
