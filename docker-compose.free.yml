@@ -83,6 +83,25 @@ services:
         --hostname free@%h
         --loglevel info
 
+  # Browser playground for demos and manual capability checks.
+  # WARNING: this bypasses production auth and the queue path. Expose port 8800
+  # only temporarily, or restrict it to trusted team IPs in AWS Security Groups.
+  playground:
+    <<: *app-base
+    command: >
+      uvicorn playground.server:app
+        --host 0.0.0.0
+        --port 8800
+        --log-level info
+    ports:
+      - "8800:8800"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8800/"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
   redis:
     image: redis:7-alpine
     command: redis-server --save "" --maxmemory 512mb --maxmemory-policy allkeys-lru

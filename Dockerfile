@@ -1,23 +1,23 @@
 # =============================================================================
-# Health AI Microservice — Production Dockerfile
-# Target: Linux (Ubuntu 22.04 base). Develops on Windows, runs on Linux.
+# Marcusina Health AI Microservice
 # =============================================================================
-# Multi-stage build:
-#   Stage 1 (builder) — install Python deps (heavier, not shipped)
-#   Stage 2 (runtime) — lean final image with only what's needed at runtime
+# Multi-stage Docker image for the production API, Celery worker, and optional
+# playground server. docker-compose.free.yml reuses this same image with
+# different commands for each service.
 
 FROM python:3.11-slim-bookworm AS builder
 
-# System deps needed to BUILD some packages (gcc for hiredis, etc.)
+# Build deps for Python packages with native extensions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+
 COPY requirements_core.txt requirements_ml.txt requirements_nlp.txt requirements_observability.txt ./
 
-# Install all groups in one pip call so the resolver sees every package at once
+# Install all dependency groups together so pip can resolve shared constraints.
 RUN pip install --no-cache-dir --prefix=/install \
     -r requirements_core.txt \
     -r requirements_ml.txt \
@@ -25,13 +25,12 @@ RUN pip install --no-cache-dir --prefix=/install \
     -r requirements_observability.txt
 
 
-# ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM python:3.11-slim-bookworm AS runtime
 
-# Runtime system deps:
-#   libgomp1 → OpenMP (needed by faiss-cpu and ONNX Runtime)
-#   curl     → health checks
-#   Note: NO ffmpeg package needed — faster-whisper uses PyAV (bundled)
+# Runtime deps:
+#   libgomp1 -> OpenMP for faiss-cpu and ONNX Runtime
+#   curl     -> Docker health checks
+# faster-whisper uses PyAV, so no separate ffmpeg package is required here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     curl \
@@ -39,33 +38,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
-# Download spaCy English model (needed by presidio)
-RUN python -m spacy download en_core_web_sm
+# Presidio needs the spaCy English model. Installing the pinned model wheel is
+# more reliable in Docker than `python -m spacy download en_core_web_sm`.
+RUN pip install --no-cache-dir \
+    https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
-# Copy application source
 COPY app/ ./app/
+COPY playground/ ./playground/
 COPY scripts/ ./scripts/
 
-# Create dirs for models and logs
 RUN mkdir -p models/whisper models/onnx models/faiss models/embedders logs
 
-# Non-root user for security
 RUN useradd -m -u 1001 aiuser && chown -R aiuser:aiuser /app
 USER aiuser
 
-EXPOSE 8001
+EXPOSE 8001 8800
 
 HEALTHCHECK --interval=20s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
-# Default: Gunicorn with uvicorn workers
-# Override CMD for Celery workers in docker-compose
+# Default command for the API service. Compose overrides this for workers and
+# the playground service.
 CMD ["gunicorn", "app.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "4", \
      "--bind", "0.0.0.0:8001", \
-     "--timeout", "30", \
+     "--timeout", "60", \
      "--log-level", "info"]
